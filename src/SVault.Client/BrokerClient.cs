@@ -206,17 +206,17 @@ public sealed class BrokerClient
     public Task<OkResult> RejectAsync(string requestId, string passphrase) =>
         SendAsync<OkResult>("reject", new { requestId, passphrase });
 
-    public Task<OkResult> SetTotpAsync(string secret, string passphrase) =>
-        SendAsync<OkResult>("set_totp", new { secret, passphrase });
+    public Task<OkResult> SetTotpAsync(string secret, string passphrase, string? totp = null) =>
+        SendAsync<OkResult>("set_totp", new { secret, passphrase, totp });
 
-    public Task<OkResult> DisableTotpAsync(string passphrase) =>
-        SendAsync<OkResult>("disable_totp", new { passphrase });
+    public Task<OkResult> DisableTotpAsync(string passphrase, string? totp = null) =>
+        SendAsync<OkResult>("disable_totp", new { passphrase, totp });
 
-    public Task<OkResult> ChangePassphraseAsync(string current, string next) =>
-        SendAsync<OkResult>("change_passphrase", new { currentPassphrase = current, newPassphrase = next });
+    public Task<OkResult> ChangePassphraseAsync(string current, string next, string? totp = null) =>
+        SendAsync<OkResult>("change_passphrase", new { currentPassphrase = current, newPassphrase = next, totp });
 
-    public Task<OkResult> ResetVaultAsync(string passphrase) =>
-        SendAsync<OkResult>("reset_vault", new { passphrase });
+    public Task<OkResult> ResetVaultAsync(string passphrase, string? totp = null) =>
+        SendAsync<OkResult>("reset_vault", new { passphrase, totp });
 
     private static Dictionary<string, object?> Merge(object primary, object? extra)
     {

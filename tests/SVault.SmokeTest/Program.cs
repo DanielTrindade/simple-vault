@@ -1,7 +1,11 @@
 using System.Diagnostics;
 using System.Text.Json;
+using SVault.Broker;
 using SVault.Client;
 using SVault.Core.Crypto;
+using SVault.Core.Logging;
+using SVault.Core.Protocol;
+using SVault.Core.Storage;
 
 namespace SVault.SmokeTest;
 
@@ -34,6 +38,8 @@ internal static class Program
         var pipeName = "svault.smoke." + Guid.NewGuid().ToString("N")[..8];
         Directory.CreateDirectory(home);
 
+        await RunVaultStoreRegressionsAsync();
+
         using var server = new FakeHttpServer();
         using var broker = StartBroker(brokerExe, home, pipeName);
 
@@ -55,12 +61,344 @@ internal static class Program
         return _failed == 0 ? 0 : 1;
     }
 
+    private static async Task RunVaultStoreRegressionsAsync()
+    {
+        await Test("redacao cobre segredos curtos e JSON escapado sem alterar a mascara", () =>
+        {
+            var redactor = new SVault.Core.Redaction.SecretRedactor(System.Text.Encoding.UTF8.GetBytes("fake&value"));
+            var json = redactor.Redact("{\"echo\":\"fake\\u0026value\"}");
+            Check(!json.Contains("fake", StringComparison.Ordinal), "o segredo JSON escapado permaneceu visivel");
+            var shortRedactor = new SVault.Core.Redaction.SecretRedactor(System.Text.Encoding.UTF8.GetBytes("R"));
+            var once = shortRedactor.Redact("secret=R");
+            Check(once == shortRedactor.Redact(once), "a segunda redação alterou o marcador");
+            var markerSecret = new SVault.Core.Redaction.SecretRedactor(System.Text.Encoding.UTF8.GetBytes("***REDACTED***suffix-privado"));
+            Check(!markerSecret.Redact("prefix=***REDACTED***suffix-privado").Contains("suffix-privado", StringComparison.Ordinal), "segredo que comeca pelo marcador permaneceu visivel");
+            var booleanSecret = new SVault.Core.Redaction.SecretRedactor(System.Text.Encoding.UTF8.GetBytes("false"));
+            Check(booleanSecret.Redact("{\"value\":false}").Contains(SVault.Core.Redaction.SecretRedactor.Mask, StringComparison.Ordinal), "valor booleano igual ao segredo nao foi redigido");
+            return Task.CompletedTask;
+        });
+
+        await Test("alteracoes administrativas exigem o TOTP atual", () =>
+        {
+            var folder = Path.Combine(Path.GetTempPath(), "svault-totp-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(folder);
+            try
+            {
+                var store = new VaultStore(Path.Combine(folder, "state.json"), new MemoryCredentialStore());
+                const string passphrase = "senha-totp-de-teste";
+                const string secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+                store.Initialize(passphrase, true, secret);
+                var code = Totp.GenerateCode(secret, DateTime.UtcNow);
+                const string newSecret = "KRUGS4ZANFZSAYJAKRUGS4ZANFZSAYJA";
+                ExpectStoreError(() => store.SetTotp(newSecret, passphrase), "totp_invalid");
+                ExpectStoreError(() => store.DisableTotp(passphrase), "totp_invalid");
+                ExpectStoreError(() => store.ChangePassphrase(passphrase, "nova-senha-totp"), "totp_invalid");
+                ExpectStoreError(() => store.Reset(passphrase), "totp_invalid");
+                Check(store.TotpEnabled && store.VerifyPassphrase(passphrase), "uma administracao sem TOTP alterou o cofre");
+                store.SetTotp(newSecret, passphrase, code);
+                Check(store.TotpEnabled, "TOTP valido nao permitiu a troca do fator");
+                var newCode = Totp.GenerateCode(newSecret, DateTime.UtcNow);
+                store.DisableTotp(passphrase, newCode);
+                Check(!store.TotpEnabled, "TOTP valido nao permitiu a desativacao");
+            }
+            finally
+            {
+                TryDelete(folder);
+            }
+            return Task.CompletedTask;
+        });
+
+        await Test("politica de URL distingue caminho e normaliza apenas esquema e host", () =>
+        {
+            Check(!SVault.Core.Storage.TargetPolicy.IsTargetAllowed(new[] { "https://example.com/Admin" }, "https://example.com/admin"), "caminhos diferiram apenas por caixa e foram aceitos");
+            Check(SVault.Core.Storage.TargetPolicy.IsTargetAllowed(new[] { "https://example.com/Admin" }, "HTTPS://EXAMPLE.COM/Admin?x=1"), "host ou query permitida foi recusada");
+            Check(!SVault.Core.Storage.TargetPolicy.IsTargetAllowed(new[] { "https://example.com/Admin" }, "https://user@example.com/Admin"), "userinfo foi aceito");
+            Check(!SVault.Core.Storage.TargetPolicy.IsTargetAllowed(new[] { "https://example.com/Admin" }, "https://example.com/Admin#frag"), "fragmento foi aceito");
+            return Task.CompletedTask;
+        });
+
+        await Test("interpolacao trata delimitadores em segredos e parametros como dados", () =>
+        {
+            var secret = System.Text.Encoding.UTF8.GetBytes("valor{{injetado}}");
+            var parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["p"] = "param{{injetado}}"
+            };
+            var context = new SVault.Core.Operations.OperationContext
+            {
+                Operation = new SVault.Core.Storage.OperationRecord
+                {
+                    Action = SVault.Core.Operations.OperationEngine.ActionHttpRequest,
+                    Params = new List<string> { "p" },
+                    Http = new SVault.Core.Storage.HttpRequestRecord
+                    {
+                        BodyFields = new Dictionary<string, string> { ["value"] = "{{secret}}/{{param:p}}" }
+                    }
+                },
+                Secret = secret,
+                ReferencedSecrets = new Dictionary<string, byte[]>(),
+                Parameters = parameters,
+                Redactor = new SVault.Core.Redaction.SecretRedactor(new[] { secret }),
+                Cancellation = CancellationToken.None
+            };
+            try
+            {
+                var result = SVault.Core.Operations.OperationEngine.ResolveTemplate("{{secret}}/{{param:p}}", context);
+                Check(result == "valor{{injetado}}/param{{injetado}}", "valores com chaves foram reinterpretados ou recusados");
+                var composed = SVault.Core.Operations.OperationEngine.ResolveTemplate("inicio-{{secret}}-fim", context);
+                Check(composed == "inicio-valor{{injetado}}-fim", "interpolacao composta alterou o segredo");
+                try
+                {
+                    SVault.Core.Operations.OperationEngine.ResolveTemplate("{{placeholder-invalido}}", context);
+                    throw new InvalidOperationException("template original invalido foi aceito");
+                }
+                catch (SVault.Core.Operations.OperationFailure)
+                {
+                    Check(true, "a gramática original foi validada");
+                }
+            }
+            finally
+            {
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret);
+            }
+            return Task.CompletedTask;
+        });
+
+        await Test("process.stdin legado e recusado sem iniciar executavel", async () =>
+        {
+            var context = new SVault.Core.Operations.OperationContext
+            {
+                Operation = new SVault.Core.Storage.OperationRecord
+                {
+                    Action = SVault.Core.Operations.OperationEngine.ActionProcessStdin,
+                    Process = new SVault.Core.Storage.ProcessRecord { Executable = "executavel-inexistente" }
+                },
+                Secret = Array.Empty<byte>(),
+                ReferencedSecrets = new Dictionary<string, byte[]>(),
+                Parameters = new Dictionary<string, string>(),
+                Redactor = new SVault.Core.Redaction.SecretRedactor(Array.Empty<byte[]>()),
+                Cancellation = CancellationToken.None
+            };
+            try
+            {
+                await SVault.Core.Operations.OperationEngine.ExecuteAsync(context);
+                throw new InvalidOperationException("process.stdin legado foi executado");
+            }
+            catch (SVault.Core.Operations.OperationFailure)
+            {
+                Check(true, "a execucao de processo permaneceu desabilitada");
+            }
+        });
+
+        await Test("rotacao falha sem danificar geracao anterior", () =>
+        {
+            var folder = Path.Combine(Path.GetTempPath(), "svault-rotation-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(folder);
+            try
+            {
+                var stateFile = Path.Combine(folder, "state.json");
+                var storage = new FailingCredentialStore(new MemoryCredentialStore());
+                var store = new VaultStore(stateFile, storage);
+                store.Initialize("senha-antiga-de-teste", false, null);
+                store.RegisterEntry("A", "generic", "A", Array.Empty<string>(), System.Text.Encoding.UTF8.GetBytes("segredo-a"), "senha-antiga-de-teste");
+                store.RegisterEntry("B", "generic", "B", Array.Empty<string>(), System.Text.Encoding.UTF8.GetBytes("segredo-b"), "senha-antiga-de-teste");
+                storage.FailOnWrite(2);
+
+                try
+                {
+                    store.ChangePassphrase("senha-antiga-de-teste", "senha-nova-de-teste");
+                    throw new InvalidOperationException("a falha de escrita deveria interromper a rotacao");
+                }
+                catch (IOException)
+                {
+                }
+
+                storage.FailOnWrite(null);
+                var reopened = new VaultStore(stateFile, storage);
+                Check(reopened.VerifyPassphrase("senha-antiga-de-teste"), "a senha antiga deixou de abrir o cofre");
+                Check(!reopened.VerifyPassphrase("senha-nova-de-teste"), "a senha nova foi confirmada sem commit");
+                Check(System.Text.Encoding.UTF8.GetString(reopened.UnwrapSecret("A", "senha-antiga-de-teste")) == "segredo-a", "o primeiro segredo foi alterado");
+                Check(System.Text.Encoding.UTF8.GetString(reopened.UnwrapSecret("B", "senha-antiga-de-teste")) == "segredo-b", "o segundo segredo foi alterado");
+
+                storage.FailOnRead(1);
+                try
+                {
+                    reopened.ChangePassphrase("senha-antiga-de-teste", "senha-nova-de-teste");
+                    throw new InvalidOperationException("a falha de leitura deveria interromper a rotacao");
+                }
+                catch (IOException)
+                {
+                }
+                storage.FailOnRead(null);
+                reopened = new VaultStore(stateFile, storage);
+                Check(reopened.VerifyPassphrase("senha-antiga-de-teste"), "a falha de leitura invalidou a senha antiga");
+                Check(System.Text.Encoding.UTF8.GetString(reopened.UnwrapSecret("A", "senha-antiga-de-teste")) == "segredo-a", "a falha de leitura alterou o primeiro segredo");
+
+                FileStream? commitBlock = null;
+                storage.FailOnWrite(null);
+                storage.AfterWrite = number =>
+                {
+                    if (number == 2)
+                    {
+                        commitBlock = new FileStream(stateFile, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    }
+                };
+                try
+                {
+                    reopened.ChangePassphrase("senha-antiga-de-teste", "senha-nova-de-teste");
+                    throw new InvalidOperationException("o bloqueio do commit deveria interromper a rotacao");
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                }
+                finally
+                {
+                    commitBlock?.Dispose();
+                    storage.AfterWrite = null;
+                }
+                reopened = new VaultStore(stateFile, storage);
+                Check(reopened.VerifyPassphrase("senha-antiga-de-teste"), "a falha no commit invalidou a senha antiga");
+                Check(System.Text.Encoding.UTF8.GetString(reopened.UnwrapSecret("B", "senha-antiga-de-teste")) == "segredo-b", "a falha no commit alterou o segundo segredo");
+
+                reopened.ChangePassphrase("senha-antiga-de-teste", "senha-nova-de-teste");
+                var afterCommit = new VaultStore(stateFile, storage);
+                Check(!afterCommit.VerifyPassphrase("senha-antiga-de-teste"), "a senha antiga permaneceu ativa apos commit");
+                Check(afterCommit.VerifyPassphrase("senha-nova-de-teste"), "a senha nova nao abriu apos commit");
+                Check(System.Text.Encoding.UTF8.GetString(afterCommit.UnwrapSecret("B", "senha-nova-de-teste")) == "segredo-b", "segredo ausente apos commit");
+
+                try
+                {
+                    afterCommit.ChangePassphrase("senha-nova-de-teste", "curta");
+                    throw new InvalidOperationException("senha fora da politica deveria ser recusada");
+                }
+                catch (SVault.Core.Storage.VaultException ex) when (ex.Code == "bad_request")
+                {
+                }
+
+                Check(afterCommit.VerifyPassphrase("senha-nova-de-teste"), "senha curta alterou o estado persistido");
+                storage.Write("SVault:entry:sentinela", "teste", System.Text.Encoding.UTF8.GetBytes("nao-remover"));
+                afterCommit.Reset("senha-nova-de-teste");
+                Check(storage.ListTargets("SVault:entry").SequenceEqual(new[] { "SVault:entry:sentinela" }), "reset removeu alvo de terceiro ou manteve alvo inventariado");
+            }
+            finally
+            {
+                TryDelete(folder);
+            }
+            return Task.CompletedTask;
+        });
+
+        await Test("rotacao preserva TOTP e carrega estado legado sem geracao", () =>
+        {
+            var folder = Path.Combine(Path.GetTempPath(), "svault-legacy-rotation-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(folder);
+            try
+            {
+                var stateFile = Path.Combine(folder, "state.json");
+                var credentials = new MemoryCredentialStore();
+                var store = new VaultStore(stateFile, credentials);
+                const string oldPassphrase = "senha-legada-de-teste";
+                const string totpSecret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+                store.Initialize(oldPassphrase, true, totpSecret);
+                store.RegisterEntry("A", "generic", "A", Array.Empty<string>(), System.Text.Encoding.UTF8.GetBytes("segredo-legado"), oldPassphrase);
+
+                var legacyState = SVault.Core.Protocol.Json.Deserialize<VaultState>(File.ReadAllText(stateFile))!;
+                Check(legacyState.Entries.Count == 1, "fixture nao persistiu um registro");
+                var entry = legacyState.Entries.Single();
+                var legacyTarget = "SVault:entry:A";
+                var currentTarget = legacyState.KnownCredentialTargets.Single(target => target.EndsWith(":" + entry.Id, StringComparison.Ordinal));
+                var blob = credentials.Read(currentTarget)!;
+                credentials.Write(legacyTarget, entry.Id, blob);
+                legacyState.CredentialGeneration = null;
+                entry.CredentialVersion = null;
+                File.WriteAllText(stateFile, SVault.Core.Protocol.Json.Serialize(legacyState));
+
+                var reopenedLegacy = new VaultStore(stateFile, credentials);
+                Check(reopenedLegacy.VerifyPassphrase(oldPassphrase), "estado legado sem geracao nao abriu");
+                Check(System.Text.Encoding.UTF8.GetString(reopenedLegacy.UnwrapSecret("A", oldPassphrase)) == "segredo-legado", "alvo de credencial legado nao foi carregado");
+                var oldCode = Totp.GenerateCode(totpSecret, DateTime.UtcNow);
+                reopenedLegacy.ChangePassphrase(oldPassphrase, "senha-nova-legada", oldCode);
+
+                var reopenedRotated = new VaultStore(stateFile, credentials);
+                Check(reopenedRotated.VerifyPassphrase("senha-nova-legada"), "rotacao de estado legado nao persistiu a senha nova");
+                Check(reopenedRotated.TotpEnabled, "rotacao desativou o TOTP");
+                var newCode = Totp.GenerateCode(totpSecret, DateTime.UtcNow);
+                reopenedRotated.ChangePassphrase("senha-nova-legada", "terceira-senha-legada", newCode);
+                Check(reopenedRotated.VerifyPassphrase("terceira-senha-legada"), "TOTP preservado nao autorizou nova rotacao");
+                Check(reopenedRotated.TotpEnabled, "a segunda rotacao desativou o TOTP");
+                Check(System.Text.Encoding.UTF8.GetString(reopenedRotated.UnwrapSecret("A", "terceira-senha-legada")) == "segredo-legado", "rotacao de estado legado perdeu o segredo");
+            }
+            finally
+            {
+                TryDelete(folder);
+            }
+            return Task.CompletedTask;
+        });
+    }
+
+    private sealed class CountingCredentialStore(ICredentialStore inner) : ICredentialStore
+    {
+        private int _reads;
+        public int ReadCount => Volatile.Read(ref _reads);
+        public void ResetReadCount() => Interlocked.Exchange(ref _reads, 0);
+        public void Write(string target, string userName, byte[] secret) => inner.Write(target, userName, secret);
+        public byte[]? Read(string target)
+        {
+            Interlocked.Increment(ref _reads);
+            return inner.Read(target);
+        }
+        public void Delete(string target) => inner.Delete(target);
+        public IReadOnlyList<string> ListTargets(string filter) => inner.ListTargets(filter);
+    }
+
+    private sealed class FailingCredentialStore(ICredentialStore inner) : ICredentialStore
+    {
+        private int _writes;
+        private int _reads;
+        public int? FailWriteNumber { get; set; }
+        public int? FailReadNumber { get; set; }
+        public Action<int>? AfterWrite { get; set; }
+        public void FailOnWrite(int? number)
+        {
+            _writes = 0;
+            _reads = 0;
+            FailWriteNumber = number;
+            FailReadNumber = null;
+        }
+        public void Write(string target, string userName, byte[] secret)
+        {
+            _writes++;
+            if (_writes == FailWriteNumber)
+            {
+                throw new IOException("falha de armazenamento sintetica");
+            }
+
+            inner.Write(target, userName, secret);
+            AfterWrite?.Invoke(_writes);
+        }
+        public void FailOnRead(int? number)
+        {
+            _reads = 0;
+            FailReadNumber = number;
+        }
+        public byte[]? Read(string target)
+        {
+            _reads++;
+            if (_reads == FailReadNumber)
+            {
+                throw new IOException("falha sintetica de leitura");
+            }
+            return inner.Read(target);
+        }
+        public void Delete(string target) => inner.Delete(target);
+        public IReadOnlyList<string> ListTargets(string filter) => inner.ListTargets(filter);
+    }
+
     private static Process StartBroker(string exe, string home, string pipeName)
     {
         var startInfo = new ProcessStartInfo
         {
             FileName = exe,
-            Arguments = $"--console --home \"{home}\" --pipe {pipeName}",
+            Arguments = $"--console --in-memory-credentials --home \"{home}\" --pipe {pipeName}",
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -175,7 +513,7 @@ internal static class Program
                     contentType = "application/json",
                     bodyFields = new Dictionary<string, string>
                     {
-                        ["usuario"] = "{{param:usuario}}",
+                        ["usuario"] = "Bearer {{param:usuario}} {{secret}}",
                         ["senha"] = "{{secret}}"
                     },
                     headers = new Dictionary<string, string>(),
@@ -208,6 +546,24 @@ internal static class Program
                 "Teste de redacao sem rede",
                 Array.Empty<string>(),
                 Passphrase);
+
+            await client.AuthorizeOperationAsync(
+                "json_invalido",
+                "CPF_PESSOAL",
+                "http.request",
+                $"{server.BaseUrl}/invalid-json",
+                "Teste de selecao restritiva",
+                Array.Empty<string>(),
+                Passphrase,
+                new
+                {
+                    method = "POST",
+                    url = $"{server.BaseUrl}/invalid-json",
+                    contentType = "application/json",
+                    bodyFields = new Dictionary<string, string> { ["cpf"] = "{{secret}}" },
+                    headers = new Dictionary<string, string>(),
+                    resultFields = new[] { "safe" }
+                });
         });
 
         await Test("alvo nao autorizado para o registro e recusado", async () =>
@@ -256,6 +612,156 @@ internal static class Program
             Check(error.Code == "bad_request", $"codigo inesperado: {error.Code}");
         });
 
+        await Test("segredos de um a tres caracteres nao podem ser persistidos em templates", async () =>
+        {
+            var created = false;
+            try
+            {
+                await client.RegisterEntryAsync("SEGREDO_CURTO", "generic", "segredo curto sintético", new[] { server.BaseUrl }, "a", Passphrase);
+                created = true;
+                var cases = new[] { "a", "bc", "xyz", " " };
+                for (var index = 0; index < cases.Length; index++)
+                {
+                    var secret = cases[index];
+                    await client.UpdateEntryAsync("SEGREDO_CURTO", secret, null, null, Passphrase);
+                    var literalTemplate = $"literal-prefix-{secret}-suffix";
+                    var error = await ExpectErrorAsync(() => client.AuthorizeOperationAsync(
+                        $"curto_literal_{index}",
+                        "SEGREDO_CURTO",
+                        "http.request",
+                        $"{server.BaseUrl}/curto/{index}",
+                        "validacao de segredo literal curto",
+                        Array.Empty<string>(),
+                        Passphrase,
+                        new
+                        {
+                            method = "POST",
+                            url = $"{server.BaseUrl}/curto/{index}",
+                            contentType = "application/json",
+                            bodyFields = new Dictionary<string, string> { ["value"] = literalTemplate },
+                            headers = new Dictionary<string, string>(),
+                            resultFields = Array.Empty<string>()
+                        }));
+                    Check(error.Code == "bad_request", $"literal de {secret.Length} caractere(s) foi aceito");
+
+                    if (index == 2)
+                    {
+                        var adjacent = await ExpectErrorAsync(() => client.AuthorizeOperationAsync(
+                            "curto_placeholder_adjacente",
+                            "SEGREDO_CURTO",
+                            "http.request",
+                            $"{server.BaseUrl}/curto/placeholder",
+                            "literal entre placeholders",
+                            new[] { "p" },
+                            Passphrase,
+                            new
+                            {
+                                method = "POST",
+                                url = $"{server.BaseUrl}/curto/placeholder",
+                                contentType = "application/json",
+                                bodyFields = new Dictionary<string, string> { ["value"] = "{{secret}}xyz{{param:p}}" },
+                                headers = new Dictionary<string, string>(),
+                                resultFields = Array.Empty<string>()
+                            }));
+                        Check(adjacent.Code == "bad_request", "segredo curto adjacente a placeholders foi aceito");
+                    }
+                }
+
+                var persisted = File.ReadAllText(Path.Combine(home, "state", "vault-state.json"));
+                Check(!persisted.Contains("literal-prefix-xyz-suffix", StringComparison.Ordinal), "literal curto apareceu no arquivo de estado");
+                var operations = await client.ListOperationsAsync();
+                Check(!operations.Operations.Any(operation => operation.Id.StartsWith("curto_literal_", StringComparison.Ordinal)), "autorizacao recusada foi persistida");
+            }
+            finally
+            {
+                if (created)
+                {
+                    await client.DeleteEntryAsync("SEGREDO_CURTO", Passphrase);
+                }
+            }
+        });
+
+        await Test("templates invalidos sao recusados antes de persistir autorizacao", async () =>
+        {
+            var error = await ExpectErrorAsync(() => client.AuthorizeOperationAsync(
+                "template_parametro_nao_declarado",
+                "CPF_PESSOAL",
+                "http.request",
+                $"{server.BaseUrl}/template-invalido",
+                "template com parametro nao declarado",
+                Array.Empty<string>(),
+                Passphrase,
+                new
+                {
+                    method = "POST",
+                    url = $"{server.BaseUrl}/template-invalido",
+                    contentType = "application/json",
+                    bodyFields = new Dictionary<string, string> { ["value"] = "{{param:ausente}}" },
+                    headers = new Dictionary<string, string>(),
+                    resultFields = Array.Empty<string>()
+                }));
+            Check(error.Code == "bad_request", $"template invalido retornou {error.Code}");
+            var operations = await client.ListOperationsAsync();
+            Check(!operations.Operations.Any(operation => operation.Id == "template_parametro_nao_declarado"), "template invalido foi persistido");
+        });
+
+        await Test("URL efetiva de autorizacao legada e revalidada antes de abrir segredos", async () =>
+        {
+            var folder = Path.Combine(Path.GetTempPath(), "svault-legacy-url-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(folder);
+            try
+            {
+                var credentials = new CountingCredentialStore(new MemoryCredentialStore());
+                var store = new VaultStore(Path.Combine(folder, "state.json"), credentials);
+                const string passphrase = "senha-legada-url";
+                store.Initialize(passphrase, false, null);
+                var target = server.BaseUrl + "/Admin";
+                store.RegisterEntry("LEGACY_URL", "generic", "destino legado", new[] { target }, System.Text.Encoding.UTF8.GetBytes("segredo-sintetico"), passphrase);
+                store.AuthorizeOperation(new OperationRecord
+                {
+                    Id = "http_legado",
+                    EntryId = "LEGACY_URL",
+                    Action = "http.request",
+                    Target = target,
+                    Http = new HttpRequestRecord
+                    {
+                        Method = "GET",
+                        Url = server.BaseUrl + "/admin",
+                        BodyFields = new Dictionary<string, string>(),
+                        Headers = new Dictionary<string, string>()
+                    }
+                }, passphrase);
+
+                var engine = new BrokerEngine(store, new VaultLog(Path.Combine(folder, "broker.log")), new SVault.Core.BrokerConfig());
+                var requestResponse = await engine.HandleAsync(new Envelope
+                {
+                    Cmd = "request_operation",
+                    Body = JsonSerializer.SerializeToElement(new { opId = "http_legado", @params = new { } }, Json.Options)
+                }, "sintetico");
+                Check(requestResponse.Ok && requestResponse.Data.HasValue, "a solicitacao legada de teste nao foi criada");
+                var request = JsonSerializer.Deserialize<SVault.Core.Protocol.OperationRequestResult>(requestResponse.Data!.Value.GetRawText(), Json.Options)!;
+                credentials.ResetReadCount();
+                int receivedBefore;
+                lock (server.ReceivedBodies) receivedBefore = server.ReceivedBodies.Count;
+
+                var approval = await engine.HandleAsync(new Envelope
+                {
+                    Cmd = "approve",
+                    Body = JsonSerializer.SerializeToElement(new { requestId = request.RequestId, passphrase }, Json.Options)
+                }, "sintetico");
+
+                int receivedAfter;
+                lock (server.ReceivedBodies) receivedAfter = server.ReceivedBodies.Count;
+                Check(!approval.Ok && approval.Error?.Code == "target_not_allowed", "URL legada divergente nao foi recusada");
+                Check(credentials.ReadCount == 0, "segredo foi aberto antes de validar a URL efetiva");
+                Check(receivedAfter == receivedBefore, "pedido chegou ao destino fora do alvo autorizado");
+            }
+            finally
+            {
+                TryDelete(folder);
+            }
+        });
+
         await Test("solicitacao do agente nao devolve segredo", async () =>
         {
             var request = await client.RequestOperationAsync("login_portal_a",
@@ -263,7 +769,26 @@ internal static class Program
 
             Check(request.Status == "pending_approval", $"status inesperado: {request.Status}");
             Check(request.Requires == "passphrase", $"requisicao inesperada: {request.Requires}");
+            Check(request.Summary.Parameters.TryGetValue("usuario", out var shown) && shown == "usuario-ficticio", "parametro efetivo ausente do resumo");
             Check(!ContainsSecret(request), "a solicitacao vazou o segredo");
+        });
+
+        await Test("parametro obrigatorio ausente e recusado antes de criar solicitacao", async () =>
+        {
+            var error = await ExpectErrorAsync(() => client.RequestOperationAsync("login_portal_a"));
+            Check(error.Code == "bad_request", $"codigo inesperado: {error.Code}");
+            var typeError = await ExpectErrorAsync(() => client.SendRawAsync("request_operation", new { opId = "login_portal_a", @params = new { usuario = 7 } }));
+            Check(typeError.Code == "bad_request", $"tipo de parametro inesperado aceito: {typeError.Code}");
+        });
+
+        await Test("JSON invalido nunca retorna corpo fora da selecao", async () =>
+        {
+            var request = await client.RequestOperationAsync("json_invalido");
+            var result = await client.ApproveAsync(request.RequestId, Passphrase);
+            var rendered = JsonSerializer.Serialize(result);
+            Check(result.Status == "failed", $"status inesperado: {result.Status}");
+            Check(!rendered.Contains("raw-invalid-secret", StringComparison.Ordinal), "corpo JSON invalido foi devolvido");
+            Check(result.Error == "Falha na execucao autorizada.", "erro de execucao expôs detalhe externo");
         });
 
         await Test("aprovacao com senha errada falha", async () =>
@@ -293,6 +818,8 @@ internal static class Program
                 Check(server.ReceivedBodies.Count > 0, "o servidor fake nao recebeu a requisicao");
                 Check(server.ReceivedBodies[^1].Contains(SenhaFake, StringComparison.Ordinal),
                     "o broker nao enviou o segredo ao destino autorizado");
+                Check(server.ReceivedBodies[^1].Contains("Bearer usuario-ficticio", StringComparison.Ordinal),
+                    "template composto nao resolveu o parametro junto com texto literal");
             }
         });
 
@@ -307,6 +834,33 @@ internal static class Program
             Check(!rendered.Contains(CpfFake, StringComparison.Ordinal), "o cpf vazou no status");
         });
 
+        await Test("aprovacao concorrente executa uma unica requisicao", async () =>
+        {
+            var request = await client.RequestOperationAsync("login_portal_a", new Dictionary<string, string> { ["usuario"] = "concorrente" });
+            int before;
+            lock (server.ReceivedBodies) before = server.ReceivedBodies.Count;
+
+            async Task<string> AttemptAsync()
+            {
+                try
+                {
+                    var result = await client.ApproveAsync(request.RequestId, Passphrase);
+                    return result.Status ?? "unknown";
+                }
+                catch (BrokerCallException ex)
+                {
+                    return ex.Code ?? "error";
+                }
+            }
+
+            var outcomes = await Task.WhenAll(AttemptAsync(), AttemptAsync());
+            Check(outcomes.Count(value => value == "completed") == 1, "nao houve exatamente uma aprovacao concluida");
+            Check(outcomes.Count(value => value == "conflict") == 1, "a segunda aprovacao nao recebeu conflito");
+            lock (server.ReceivedBodies) Check(server.ReceivedBodies.Count == before + 1, "a requisicao foi enviada mais de uma vez");
+            var rejected = await ExpectErrorAsync(() => client.RejectAsync(request.RequestId, Passphrase));
+            Check(rejected.Code == "conflict", "rejeicao sobrescreveu uma operacao concluida");
+        });
+
         await Test("acao noop eco devolve apenas mascara", async () =>
         {
             var request = await client.RequestOperationAsync("eco_teste");
@@ -315,6 +869,26 @@ internal static class Program
             var rendered = JsonSerializer.Serialize(approval.Result);
             Check(rendered.Contains("***REDACTED***", StringComparison.Ordinal), "o eco nao foi redigido");
             Check(!rendered.Contains(CpfFake, StringComparison.Ordinal), "o cpf vazou no eco");
+        });
+
+        await Test("revogar e reautorizar mesmo ID invalida pedido antigo", async () =>
+        {
+            var request = await client.RequestOperationAsync("eco_teste");
+            await client.RevokeOperationAsync("eco_teste", Passphrase);
+            await client.AuthorizeOperationAsync("eco_teste", "CPF_PESSOAL", "noop.echo", "eco", "Teste de redacao sem rede", Array.Empty<string>(), Passphrase);
+            var error = await ExpectErrorAsync(() => client.ApproveAsync(request.RequestId, Passphrase));
+            Check(error.Code == "conflict", $"pedido revogado foi reutilizado: {error.Code}");
+        });
+
+        await Test("mudanca de registro invalida pedido pendente", async () =>
+        {
+            var request = await client.RequestOperationAsync("login_portal_a", new Dictionary<string, string> { ["usuario"] = "alvo-alterado" });
+            var previousCount = server.ReceivedBodies.Count;
+            await client.UpdateEntryAsync("SENHA_PORTAL_A", null, null, new[] { server.BaseUrl + "/changed" }, Passphrase);
+            var error = await ExpectErrorAsync(() => client.ApproveAsync(request.RequestId, Passphrase));
+            Check(error.Code == "conflict", $"pedido continuou válido após revisão do registro: {error.Code}");
+            await client.UpdateEntryAsync("SENHA_PORTAL_A", null, null, new[] { server.BaseUrl }, Passphrase);
+            Check(server.ReceivedBodies.Count == previousCount, "pedido inválido alcançou o servidor");
         });
 
         await Test("operacao pode combinar dois registros autorizados", async () =>
@@ -487,9 +1061,8 @@ internal static class Program
         await Test("a senha do cofre e trocada re-rotulando os segredos", async () =>
         {
             var nova = "nova-senha-de-teste-2026";
-            await client.ChangePassphraseAsync(Passphrase, nova);
-
             var code = Totp.GenerateCode(_totpSecret!, DateTime.UtcNow);
+            await client.ChangePassphraseAsync(Passphrase, nova, code);
 
             var request = await client.RequestOperationAsync("enviar_cpf");
             var error = await ExpectErrorAsync(() => client.ApproveAsync(request.RequestId, Passphrase, code));
@@ -530,6 +1103,20 @@ internal static class Program
         {
             throw new InvalidOperationException(message);
         }
+    }
+
+    private static void ExpectStoreError(Action action, string code)
+    {
+        try
+        {
+            action();
+        }
+        catch (SVault.Core.Storage.VaultException ex) when (ex.Code == code)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException($"esperava erro {code}");
     }
 
     private static async Task Test(string name, Func<Task> body)

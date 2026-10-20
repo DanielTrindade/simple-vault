@@ -27,11 +27,13 @@ public sealed class VaultStore
 
     private readonly object _gate = new();
     private readonly string _stateFile;
+    private readonly ICredentialStore _credentials;
     private VaultState _state = new();
 
-    public VaultStore(string? stateFile = null)
+    public VaultStore(string? stateFile = null, ICredentialStore? credentials = null)
     {
         _stateFile = stateFile ?? Paths.StateFile;
+        _credentials = credentials ?? new WindowsCredentialStore();
         Load();
     }
 
@@ -41,7 +43,7 @@ public sealed class VaultStore
         {
             lock (_gate)
             {
-                return _state;
+                return CloneState(_state);
             }
         }
     }
@@ -74,17 +76,40 @@ public sealed class VaultStore
         }
     }
 
-    private void Save()
+    private void Save(VaultState? candidate = null)
     {
         lock (_gate)
         {
             var directory = Path.GetDirectoryName(_stateFile)!;
             Directory.CreateDirectory(directory);
 
-            var json = JsonSerializer.Serialize(_state, Json.Options);
-            var temp = _stateFile + ".tmp";
-            File.WriteAllText(temp, json, new UTF8Encoding(false));
-            File.Move(temp, _stateFile, overwrite: true);
+            var json = JsonSerializer.Serialize(candidate ?? _state, Json.Options);
+            var temp = _stateFile + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
+                {
+                    writer.Write(json);
+                    writer.Flush();
+                    stream.Flush(flushToDisk: true);
+                }
+
+                File.Move(temp, _stateFile, overwrite: true);
+            }
+            finally
+            {
+                if (File.Exists(temp))
+                {
+                    try
+                    {
+                        File.Delete(temp);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
         }
     }
 
@@ -92,6 +117,7 @@ public sealed class VaultStore
     {
         lock (_gate)
         {
+            ValidateNewPassphrase(passphrase);
             if (_state.Initialized)
             {
                 throw new VaultException(ErrorCodes.Conflict, "O cofre ja esta inicializado.");
@@ -99,23 +125,32 @@ public sealed class VaultStore
 
             var masterSalt = VaultCrypto.RandomSalt();
             var vaultKey = VaultCrypto.DeriveVaultKey(passphrase, masterSalt);
-
-            _state.MasterSalt = VaultCrypto.ToBase64(masterSalt);
-            _state.KeyCheck = VaultCrypto.ToBase64(VaultCrypto.Seal(KeyCheckBytes, vaultKey));
-            _state.Initialized = true;
-
-            string? generatedTotp = null;
-            if (enableTotp)
+            try
             {
-                generatedTotp = string.IsNullOrWhiteSpace(totpSecret) ? Totp.GenerateSecret() : totpSecret.Trim();
-                _state.TotpSecret = VaultCrypto.ToBase64(
-                    VaultCrypto.Seal(Encoding.ASCII.GetBytes(generatedTotp), vaultKey));
-                _state.TotpEnabled = true;
-            }
+                var candidate = CloneState(_state);
+                candidate.MasterSalt = VaultCrypto.ToBase64(masterSalt);
+                candidate.KeyCheck = VaultCrypto.ToBase64(VaultCrypto.Seal(KeyCheckBytes, vaultKey));
+                candidate.CredentialGeneration = Guid.NewGuid().ToString("N");
+                candidate.Initialized = true;
 
-            Save();
-            CryptographicOperations.ZeroMemory(vaultKey);
-            return generatedTotp ?? string.Empty;
+                string? generatedTotp = null;
+                if (enableTotp)
+                {
+                    generatedTotp = string.IsNullOrWhiteSpace(totpSecret) ? Totp.GenerateSecret() : totpSecret.Trim();
+                    ValidateTotpSecret(generatedTotp);
+                    candidate.TotpSecret = VaultCrypto.ToBase64(
+                        VaultCrypto.Seal(Encoding.ASCII.GetBytes(generatedTotp), vaultKey));
+                    candidate.TotpEnabled = true;
+                }
+
+                Save(candidate);
+                _state = candidate;
+                return generatedTotp ?? string.Empty;
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(vaultKey);
+            }
         }
     }
 
@@ -140,65 +175,177 @@ public sealed class VaultStore
         }
     }
 
-    public void ChangePassphrase(string currentPassphrase, string newPassphrase)
+    public void ChangePassphrase(string currentPassphrase, string newPassphrase, string? currentTotpCode = null)
     {
         lock (_gate)
         {
+            ValidateNewPassphrase(newPassphrase);
             if (!VerifyPassphrase(currentPassphrase))
             {
                 throw new VaultException(ErrorCodes.PassphraseInvalid, "Senha do cofre invalida.");
             }
 
             var vaultKey = DeriveVaultKeyOrThrow(currentPassphrase);
-            var newMasterSalt = VaultCrypto.RandomSalt();
-            var newVaultKey = VaultCrypto.DeriveVaultKey(newPassphrase, newMasterSalt);
+            byte[]? newVaultKey = null;
+            var stagingState = CloneState(_state);
+            VaultState? candidate = null;
+            string[] oldTargets = Array.Empty<string>();
 
             try
             {
-                foreach (var entry in _state.Entries)
+                VerifyCurrentTotp(vaultKey, currentTotpCode);
+                var newMasterSalt = VaultCrypto.RandomSalt();
+                newVaultKey = VaultCrypto.DeriveVaultKey(newPassphrase, newMasterSalt);
+                var newGeneration = Guid.NewGuid().ToString("N");
+                oldTargets = stagingState.Entries.Select(e => EntryTarget(e.Id, e.CredentialVersion ?? _state.CredentialGeneration)).ToArray();
+                var legacyTargets = stagingState.Entries
+                    .Where(e => string.IsNullOrEmpty(e.CredentialVersion ?? _state.CredentialGeneration))
+                    .Select(e => EntryTarget(e.Id, null))
+                    .ToArray();
+                var newTargets = stagingState.Entries.Select(e => EntryTarget(e.Id, newGeneration)).ToArray();
+                stagingState.KnownCredentialTargets = stagingState.KnownCredentialTargets
+                    .Except(legacyTargets, StringComparer.Ordinal)
+                    .Concat(newTargets)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+                Save(stagingState);
+                _state = stagingState;
+                candidate = CloneState(stagingState);
+                candidate.CredentialGeneration = newGeneration;
+                foreach (var entry in candidate.Entries)
                 {
-                    var blob = CredentialManagerApi.Read(CredentialManagerApi.BuildTarget(EntryTargetPrefix, entry.Id))
+                    entry.CredentialVersion = null;
+                }
+                foreach (var entry in candidate.Entries)
+                {
+                    var original = _state.Entries.First(e => string.Equals(e.Id, entry.Id, StringComparison.OrdinalIgnoreCase));
+                    var blob = _credentials.Read(EntryTarget(entry.Id, original.CredentialVersion ?? _state.CredentialGeneration))
                                ?? throw new VaultException(ErrorCodes.NotFound, $"Segredo ausente: {entry.Id}.");
 
                     var entryKey = VaultCrypto.DeriveEntryKey(vaultKey, entry.Id, VaultCrypto.FromBase64(entry.EntrySalt));
-                    if (!VaultCrypto.TryOpen(blob, entryKey, out var plaintext))
+                    byte[]? plaintext = null;
+                    byte[]? newEntryKey = null;
+                    try
                     {
-                        throw new VaultException(ErrorCodes.PassphraseInvalid, "Falha ao abrir segredo durante rotacao.");
+                        if (!VaultCrypto.TryOpen(blob, entryKey, out plaintext))
+                        {
+                            throw new VaultException(ErrorCodes.PassphraseInvalid, "Falha ao abrir segredo durante rotacao.");
+                        }
+
+                        newEntryKey = VaultCrypto.DeriveEntryKey(newVaultKey!, entry.Id, VaultCrypto.FromBase64(entry.EntrySalt));
+                        var resealed = VaultCrypto.Seal(plaintext, newEntryKey);
+                        _credentials.Write(EntryTarget(entry.Id, candidate.CredentialGeneration), SecretUserName, resealed);
+
+                        var check = _credentials.Read(EntryTarget(entry.Id, candidate.CredentialGeneration));
+                        if (check is null || !VaultCrypto.TryOpen(check, newEntryKey, out var verified))
+                        {
+                            throw new VaultException(ErrorCodes.Internal, "Falha ao validar credencial durante rotacao.");
+                        }
+
+                        try
+                        {
+                            if (!CryptographicOperations.FixedTimeEquals(verified, plaintext))
+                            {
+                                throw new VaultException(ErrorCodes.Internal, "Falha ao validar credencial durante rotacao.");
+                            }
+                        }
+                        finally
+                        {
+                            CryptographicOperations.ZeroMemory(verified);
+                        }
                     }
-
-                    var newEntryKey = VaultCrypto.DeriveEntryKey(newVaultKey, entry.Id, VaultCrypto.FromBase64(entry.EntrySalt));
-                    var resealed = VaultCrypto.Seal(plaintext, newEntryKey);
-                    CredentialManagerApi.Write(
-                        CredentialManagerApi.BuildTarget(EntryTargetPrefix, entry.Id),
-                        SecretUserName,
-                        resealed);
-
-                    CryptographicOperations.ZeroMemory(plaintext);
-                    CryptographicOperations.ZeroMemory(entryKey);
-                    CryptographicOperations.ZeroMemory(newEntryKey);
+                    finally
+                    {
+                        if (plaintext is not null) CryptographicOperations.ZeroMemory(plaintext);
+                        CryptographicOperations.ZeroMemory(entryKey);
+                        if (newEntryKey is not null) CryptographicOperations.ZeroMemory(newEntryKey);
+                    }
                 }
 
-                _state.MasterSalt = VaultCrypto.ToBase64(newMasterSalt);
-                _state.KeyCheck = VaultCrypto.ToBase64(VaultCrypto.Seal(KeyCheckBytes, newVaultKey));
+                candidate.MasterSalt = VaultCrypto.ToBase64(newMasterSalt);
+                candidate.KeyCheck = VaultCrypto.ToBase64(VaultCrypto.Seal(KeyCheckBytes, newVaultKey!));
 
-                if (_state.TotpEnabled && !string.IsNullOrEmpty(_state.TotpSecret))
+                if (candidate.TotpEnabled && !string.IsNullOrEmpty(candidate.TotpSecret))
                 {
-                    if (!VaultCrypto.TryOpen(VaultCrypto.FromBase64(_state.TotpSecret), vaultKey, out var totpPlain))
+                    if (!VaultCrypto.TryOpen(VaultCrypto.FromBase64(candidate.TotpSecret), vaultKey, out var totpPlain))
                     {
                         throw new VaultException(ErrorCodes.PassphraseInvalid, "Falha ao abrir o segredo TOTP durante rotacao.");
                     }
 
-                    _state.TotpSecret = VaultCrypto.ToBase64(VaultCrypto.Seal(totpPlain, newVaultKey));
-                    CryptographicOperations.ZeroMemory(totpPlain);
+                    try
+                    {
+                        candidate.TotpSecret = VaultCrypto.ToBase64(VaultCrypto.Seal(totpPlain, newVaultKey!));
+                    }
+                    finally
+                    {
+                        CryptographicOperations.ZeroMemory(totpPlain);
+                    }
                 }
 
-                Save();
+                Save(candidate);
+                _state = candidate;
+                foreach (var target in oldTargets)
+                {
+                    try
+                    {
+                        _credentials.Delete(target);
+                        if (!string.IsNullOrEmpty(_state.CredentialGeneration))
+                        {
+                            var cleanupState = CloneState(_state);
+                            cleanupState.KnownCredentialTargets.Remove(target);
+                            Save(cleanupState);
+                            _state = cleanupState;
+                            candidate = cleanupState;
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                try
+                {
+                    Save(candidate);
+                    _state = candidate;
+                }
+                catch
+                {
+                }
             }
             finally
             {
                 CryptographicOperations.ZeroMemory(vaultKey);
-                CryptographicOperations.ZeroMemory(newVaultKey);
+                if (newVaultKey is not null) CryptographicOperations.ZeroMemory(newVaultKey);
             }
+        }
+    }
+
+    private static void ValidateNewPassphrase(string passphrase)
+    {
+        if (string.IsNullOrWhiteSpace(passphrase) || passphrase.Length < 8)
+        {
+            throw new VaultException(ErrorCodes.BadRequest, "A nova senha deve ter pelo menos oito caracteres.");
+        }
+    }
+
+    private static string EntryTarget(string id, string? generation) =>
+        CredentialManagerApi.BuildTarget(string.IsNullOrEmpty(generation) ? EntryTargetPrefix : EntryTargetPrefix + ":" + generation, id);
+
+    private static VaultState CloneState(VaultState state) =>
+        JsonSerializer.Deserialize<VaultState>(JsonSerializer.Serialize(state, Json.Options), Json.Options)!;
+
+    private static EntryRecord CloneEntry(EntryRecord entry) =>
+        JsonSerializer.Deserialize<EntryRecord>(JsonSerializer.Serialize(entry, Json.Options), Json.Options)!;
+
+    private static OperationRecord CloneOperation(OperationRecord operation) =>
+        JsonSerializer.Deserialize<OperationRecord>(JsonSerializer.Serialize(operation, Json.Options), Json.Options)!;
+
+    private void PrepareCredentialTarget(string target)
+    {
+        if (!_state.KnownCredentialTargets.Contains(target, StringComparer.Ordinal))
+        {
+            _state.KnownCredentialTargets.Add(target);
+            Save();
         }
     }
 
@@ -218,14 +365,17 @@ public sealed class VaultStore
                 var entryKey = VaultCrypto.DeriveEntryKey(vaultKey, id, entrySalt);
                 var sealedValue = VaultCrypto.Seal(value, entryKey);
 
-                CredentialManagerApi.Write(
-                    CredentialManagerApi.BuildTarget(EntryTargetPrefix, id),
+                var target = EntryTarget(id, _state.CredentialGeneration);
+                PrepareCredentialTarget(target);
+                _credentials.Write(
+                    target,
                     SecretUserName,
                     sealedValue);
 
                 var now = DateTime.UtcNow.ToString("o");
                 var record = new EntryRecord
                 {
+                    IdentityId = Guid.NewGuid().ToString("N"),
                     Id = id,
                     Kind = kind,
                     Label = label,
@@ -236,9 +386,11 @@ public sealed class VaultStore
                     EntrySalt = VaultCrypto.ToBase64(entrySalt)
                 };
 
-                _state.Entries.Add(record);
-                Save();
-                return record;
+                var candidate = CloneState(_state);
+                candidate.Entries.Add(record);
+                Save(candidate);
+                _state = candidate;
+                return CloneEntry(record);
             }
             finally
             {
@@ -254,18 +406,36 @@ public sealed class VaultStore
             var vaultKey = RequireVaultKey(passphrase);
             try
             {
-                var record = _state.Entries.FirstOrDefault(e => string.Equals(e.Id, id, StringComparison.OrdinalIgnoreCase))
-                             ?? throw new VaultException(ErrorCodes.NotFound, $"Registro nao encontrado: {id}.");
+                var current = _state.Entries.FirstOrDefault(e => string.Equals(e.Id, id, StringComparison.OrdinalIgnoreCase))
+                              ?? throw new VaultException(ErrorCodes.NotFound, $"Registro nao encontrado: {id}.");
+                var oldTarget = EntryTarget(current.Id, current.CredentialVersion ?? _state.CredentialGeneration);
+                var candidate = CloneState(_state);
+                var record = candidate.Entries.First(e => string.Equals(e.Id, id, StringComparison.OrdinalIgnoreCase));
 
                 if (value is not null)
                 {
                     var entryKey = VaultCrypto.DeriveEntryKey(vaultKey, record.Id, VaultCrypto.FromBase64(record.EntrySalt));
-                    var sealedValue = VaultCrypto.Seal(value, entryKey);
-                    CredentialManagerApi.Write(
-                        CredentialManagerApi.BuildTarget(EntryTargetPrefix, record.Id),
-                        SecretUserName,
-                        sealedValue);
-                    CryptographicOperations.ZeroMemory(entryKey);
+                    try
+                    {
+                        var version = "entry-" + Guid.NewGuid().ToString("N");
+                        var newTarget = EntryTarget(record.Id, version);
+                        var staging = CloneState(_state);
+                        if (!staging.KnownCredentialTargets.Contains(newTarget, StringComparer.Ordinal))
+                        {
+                            staging.KnownCredentialTargets.Add(newTarget);
+                            Save(staging);
+                            _state = staging;
+                            candidate = CloneState(staging);
+                            record = candidate.Entries.First(e => string.Equals(e.Id, id, StringComparison.OrdinalIgnoreCase));
+                        }
+
+                        _credentials.Write(newTarget, SecretUserName, VaultCrypto.Seal(value, entryKey));
+                        record.CredentialVersion = version;
+                    }
+                    finally
+                    {
+                        CryptographicOperations.ZeroMemory(entryKey);
+                    }
                 }
 
                 if (label is not null)
@@ -280,8 +450,25 @@ public sealed class VaultStore
 
                 record.UpdatedAt = DateTime.UtcNow.ToString("o");
                 record.Revision += 1;
-                Save();
-                return record;
+                Save(candidate);
+                _state = candidate;
+                if (value is not null)
+                {
+                    try
+                    {
+                        _credentials.Delete(oldTarget);
+                        var cleanupState = CloneState(_state);
+                        cleanupState.KnownCredentialTargets.Remove(oldTarget);
+                        Save(cleanupState);
+                        _state = cleanupState;
+                        candidate = cleanupState;
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                return CloneEntry(record);
             }
             finally
             {
@@ -300,10 +487,23 @@ public sealed class VaultStore
             var record = _state.Entries.FirstOrDefault(e => string.Equals(e.Id, id, StringComparison.OrdinalIgnoreCase))
                          ?? throw new VaultException(ErrorCodes.NotFound, $"Registro nao encontrado: {id}.");
 
-            CredentialManagerApi.Delete(CredentialManagerApi.BuildTarget(EntryTargetPrefix, record.Id));
-            _state.Entries.Remove(record);
-            _state.Operations.RemoveAll(o => string.Equals(o.EntryId, record.Id, StringComparison.OrdinalIgnoreCase));
-            Save();
+                var oldTarget = EntryTarget(record.Id, record.CredentialVersion ?? _state.CredentialGeneration);
+                var candidate = CloneState(_state);
+                candidate.Entries.RemoveAll(e => string.Equals(e.Id, record.Id, StringComparison.OrdinalIgnoreCase));
+                candidate.Operations.RemoveAll(o => string.Equals(o.EntryId, record.Id, StringComparison.OrdinalIgnoreCase));
+                Save(candidate);
+                _state = candidate;
+                try
+                {
+                    _credentials.Delete(oldTarget);
+                    var cleanupState = CloneState(_state);
+                    cleanupState.KnownCredentialTargets.Remove(oldTarget);
+                    Save(cleanupState);
+                    _state = cleanupState;
+                }
+                catch
+                {
+                }
         }
     }
 
@@ -317,7 +517,7 @@ public sealed class VaultStore
                 var record = _state.Entries.FirstOrDefault(e => string.Equals(e.Id, entryId, StringComparison.OrdinalIgnoreCase))
                              ?? throw new VaultException(ErrorCodes.NotFound, $"Registro nao encontrado: {entryId}.");
 
-                var blob = CredentialManagerApi.Read(CredentialManagerApi.BuildTarget(EntryTargetPrefix, record.Id))
+                var blob = _credentials.Read(EntryTarget(record.Id, record.CredentialVersion ?? _state.CredentialGeneration))
                            ?? throw new VaultException(ErrorCodes.NotFound, $"Segredo ausente: {entryId}.");
 
                 var entryKey = VaultCrypto.DeriveEntryKey(vaultKey, record.Id, VaultCrypto.FromBase64(record.EntrySalt));
@@ -352,7 +552,7 @@ public sealed class VaultStore
             {
                 foreach (var record in _state.Entries)
                 {
-                    var blob = CredentialManagerApi.Read(CredentialManagerApi.BuildTarget(EntryTargetPrefix, record.Id));
+                    var blob = _credentials.Read(EntryTarget(record.Id, record.CredentialVersion ?? _state.CredentialGeneration));
                     if (blob is null)
                     {
                         continue;
@@ -382,21 +582,33 @@ public sealed class VaultStore
     }
 
     /// <summary>Apaga todos os segredos e reinicia o cofre (estado e Credential Manager).</summary>
-    public int Reset()
+    public int Reset(string passphrase, string? currentTotpCode = null)
     {
         lock (_gate)
         {
-            var removed = 0;
-            foreach (var entry in _state.Entries)
+            var vaultKey = RequireVaultKey(passphrase);
+            try
             {
-                CredentialManagerApi.Delete(CredentialManagerApi.BuildTarget(EntryTargetPrefix, entry.Id));
-                removed++;
+                VerifyCurrentTotp(vaultKey, currentTotpCode);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(vaultKey);
             }
 
-            CredentialManagerApi.Delete(TotpTarget);
+            var ownedTargets = _state.KnownCredentialTargets
+                .Concat(_state.Entries.Select(e => EntryTarget(e.Id, e.CredentialVersion ?? _state.CredentialGeneration)))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            foreach (var target in ownedTargets)
+            {
+                _credentials.Delete(target);
+            }
 
-            _state = new VaultState();
-            Save();
+            var removed = _state.Entries.Count;
+            var resetState = new VaultState();
+            Save(resetState);
+            _state = resetState;
             return removed;
         }
     }
@@ -417,7 +629,7 @@ public sealed class VaultStore
                         continue;
                     }
 
-                    var blob = CredentialManagerApi.Read(CredentialManagerApi.BuildTarget(EntryTargetPrefix, record.Id));
+                    var blob = _credentials.Read(EntryTarget(record.Id, record.CredentialVersion ?? _state.CredentialGeneration));
                     if (blob is null)
                     {
                         continue;
@@ -448,6 +660,15 @@ public sealed class VaultStore
 
     public OperationRecord AuthorizeOperation(OperationRecord record, string passphrase)
     {
+        try
+        {
+            Operations.OperationEngine.ValidateTemplates(record);
+        }
+        catch (Operations.OperationFailure ex)
+        {
+            throw new VaultException(ErrorCodes.BadRequest, ex.Message);
+        }
+
         lock (_gate)
         {
             var vaultKey = RequireVaultKey(passphrase);
@@ -469,9 +690,16 @@ public sealed class VaultStore
                     $"O alvo {record.Target} nao esta autorizado para o registro {entry.Id}.");
             }
 
-            _state.Operations.Add(record);
-            Save();
-            return record;
+            var candidate = CloneState(_state);
+            var operation = CloneOperation(record);
+            if (string.IsNullOrWhiteSpace(operation.AuthorizationId))
+            {
+                operation.AuthorizationId = Guid.NewGuid().ToString("N");
+            }
+            candidate.Operations.Add(operation);
+            Save(candidate);
+            _state = candidate;
+            return CloneOperation(operation);
         }
     }
 
@@ -485,22 +713,28 @@ public sealed class VaultStore
             var record = _state.Operations.FirstOrDefault(o => string.Equals(o.Id, operationId, StringComparison.OrdinalIgnoreCase))
                          ?? throw new VaultException(ErrorCodes.NotFound, $"Operacao nao encontrada: {operationId}");
 
-            _state.Operations.Remove(record);
-            Save();
+            var candidate = CloneState(_state);
+            candidate.Operations.RemoveAll(o => string.Equals(o.Id, operationId, StringComparison.OrdinalIgnoreCase));
+            Save(candidate);
+            _state = candidate;
         }
     }
 
-    public void SetTotp(string secret, string passphrase)
+    public void SetTotp(string secret, string passphrase, string? currentTotpCode = null)
     {
         lock (_gate)
         {
             var vaultKey = RequireVaultKey(passphrase);
             try
             {
-                _state.TotpSecret = VaultCrypto.ToBase64(
+                VerifyCurrentTotp(vaultKey, currentTotpCode);
+                ValidateTotpSecret(secret.Trim());
+                var candidate = CloneState(_state);
+                candidate.TotpSecret = VaultCrypto.ToBase64(
                     VaultCrypto.Seal(Encoding.ASCII.GetBytes(secret.Trim()), vaultKey));
-                _state.TotpEnabled = true;
-                Save();
+                candidate.TotpEnabled = true;
+                Save(candidate);
+                _state = candidate;
             }
             finally
             {
@@ -509,16 +743,73 @@ public sealed class VaultStore
         }
     }
 
-    public void DisableTotp(string passphrase)
+    public void DisableTotp(string passphrase, string? currentTotpCode = null)
     {
         lock (_gate)
         {
             var vaultKey = RequireVaultKey(passphrase);
-            CryptographicOperations.ZeroMemory(vaultKey);
+            try
+            {
+                VerifyCurrentTotp(vaultKey, currentTotpCode);
+                var candidate = CloneState(_state);
+                candidate.TotpSecret = string.Empty;
+                candidate.TotpEnabled = false;
+                Save(candidate);
+                _state = candidate;
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(vaultKey);
+            }
+        }
+    }
 
-            _state.TotpSecret = string.Empty;
-            _state.TotpEnabled = false;
-            Save();
+    private void VerifyCurrentTotp(byte[] vaultKey, string? code)
+    {
+        if (!_state.TotpEnabled || string.IsNullOrEmpty(_state.TotpSecret))
+        {
+            return;
+        }
+
+        if (!VaultCrypto.TryOpen(VaultCrypto.FromBase64(_state.TotpSecret), vaultKey, out var secretBytes))
+        {
+            throw new VaultException(ErrorCodes.Internal, "Falha ao verificar o segundo fator.");
+        }
+
+        try
+        {
+            var secret = Encoding.ASCII.GetString(secretBytes);
+            if (string.IsNullOrWhiteSpace(code) || !Totp.VerifyCode(secret, code, DateTime.UtcNow))
+            {
+                throw new VaultException(ErrorCodes.TotpInvalid, "Codigo do segundo fator invalido.");
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(secretBytes);
+        }
+    }
+
+    private static void ValidateTotpSecret(string secret)
+    {
+        try
+        {
+            var decoded = Base32.Decode(secret);
+            try
+            {
+                if (decoded.Length < 16)
+                {
+                    throw new VaultException(ErrorCodes.BadRequest, "O segredo TOTP deve conter ao menos 16 bytes codificados.");
+                }
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(decoded);
+            }
+        }
+        catch (FormatException)
+        {
+            throw new VaultException(ErrorCodes.BadRequest, "O segredo TOTP tem formato invalido.");
         }
     }
 

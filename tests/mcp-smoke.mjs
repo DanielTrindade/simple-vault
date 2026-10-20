@@ -27,7 +27,7 @@ function check(name, condition, detail = "") {
   }
 }
 
-const broker = spawn(brokerExe, ["--console", "--home", home, "--pipe", pipeName], {
+const broker = spawn(brokerExe, ["--console", "--in-memory-credentials", "--home", home, "--pipe", pipeName], {
   stdio: ["ignore", "pipe", "pipe"],
 });
 broker.stdout.on("data", () => {});

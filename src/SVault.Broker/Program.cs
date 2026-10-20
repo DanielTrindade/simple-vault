@@ -17,7 +17,7 @@ if (options.Console)
 
 var config = BrokerConfig.Load(options.ConfigPath);
 var log = new VaultLog(options.LogPath);
-var store = new VaultStore(options.StatePath);
+var store = new VaultStore(options.StatePath, options.InMemoryCredentials ? new MemoryCredentialStore() : null);
 var engine = new BrokerEngine(store, log, config);
 
 var currentSid = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value ?? string.Empty;
@@ -66,6 +66,7 @@ namespace SVault.Broker
         public string? ConfigPath { get; init; }
         public string? StatePath { get; init; }
         public string? LogPath { get; init; }
+        public bool InMemoryCredentials { get; init; }
         public string PipeName { get; init; } = Paths.PipeName;
 
         public static BrokerOptions Parse(string[] args)
@@ -76,6 +77,11 @@ namespace SVault.Broker
             var statePath = GetValue(args, "--state");
             var logPath = GetValue(args, "--log");
             var pipeName = GetValue(args, "--pipe");
+            var inMemoryCredentials = args.Contains("--in-memory-credentials", StringComparer.OrdinalIgnoreCase);
+            if (inMemoryCredentials && !console)
+            {
+                throw new ArgumentException("O armazenamento em memoria so pode ser usado em modo console.");
+            }
 
             if (string.IsNullOrWhiteSpace(home))
             {
@@ -106,7 +112,8 @@ namespace SVault.Broker
                 ConfigPath = configPath ?? Path.Combine(home!, BrokerConfig.FileName),
                 StatePath = statePath ?? Path.Combine(home!, "state", "vault-state.json"),
                 LogPath = logPath ?? Path.Combine(home!, "logs", "svault-broker.log"),
-                PipeName = string.IsNullOrWhiteSpace(pipeName) ? Paths.PipeName : pipeName.Trim()
+                PipeName = string.IsNullOrWhiteSpace(pipeName) ? Paths.PipeName : pipeName.Trim(),
+                InMemoryCredentials = inMemoryCredentials
             };
         }
 

@@ -15,6 +15,8 @@ public sealed class VaultState
     /// <summary>Base64 AES-GCM envelope over a known constant; used to validate a pass phrase.</summary>
     public string KeyCheck { get; set; } = string.Empty;
 
+    public string? CredentialGeneration { get; set; }
+
     /// <summary>True when a TOTP second factor is enrolled for this vault.</summary>
     public bool TotpEnabled { get; set; }
 
@@ -24,10 +26,12 @@ public sealed class VaultState
     public List<EntryRecord> Entries { get; set; } = new();
 
     public List<OperationRecord> Operations { get; set; } = new();
+    public List<string> KnownCredentialTargets { get; set; } = new();
 }
 
 public sealed class EntryRecord
 {
+    public string IdentityId { get; set; } = string.Empty;
     public string Id { get; set; } = string.Empty;
     public string Kind { get; set; } = "generic";
     public string Label { get; set; } = string.Empty;
@@ -38,10 +42,12 @@ public sealed class EntryRecord
 
     /// <summary>Base64 per-entry salt used to derive the entry key from the vault key.</summary>
     public string EntrySalt { get; set; } = string.Empty;
+    public string? CredentialVersion { get; set; }
 }
 
 public sealed class OperationRecord
 {
+    public string AuthorizationId { get; set; } = string.Empty;
     public string Id { get; set; } = string.Empty;
     public string EntryId { get; set; } = string.Empty;
     public string Action { get; set; } = string.Empty;

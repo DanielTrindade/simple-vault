@@ -12,6 +12,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\SVault.Broker\SVault.Broker.csproj" />
     <ProjectReference Include="..\..\src\SVault.Client\SVault.Client.csproj" />
     <ProjectReference Include="..\..\src\SVault.Core\SVault.Core.csproj" />
   </ItemGroup>

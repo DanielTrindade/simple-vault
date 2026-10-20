@@ -83,12 +83,13 @@ internal sealed class FakeHttpServer : IDisposable
             ["echo"] = body
         });
 
+        var responseBody = head.Contains("/invalid-json", StringComparison.Ordinal) ? "raw-invalid-secret" : payload;
         var response = Encoding.UTF8.GetBytes(
             "HTTP/1.1 200 OK\r\n" +
             "Content-Type: application/json; charset=utf-8\r\n" +
-            $"Content-Length: {payload.Length}\r\n" +
+            $"Content-Length: {responseBody.Length}\r\n" +
             "Connection: close\r\n\r\n" +
-            payload);
+            responseBody);
 
         await stream.WriteAsync(response, _cts.Token);
         await stream.FlushAsync(_cts.Token);
