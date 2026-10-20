@@ -16,6 +16,12 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        if (!args.Contains("--allow-installed-broker", StringComparer.OrdinalIgnoreCase))
+        {
+            Console.Error.WriteLine("Esta demonstracao conecta ao broker instalado. Use --allow-installed-broker para autorizar explicitamente.");
+            return 2;
+        }
+
         var keep = args.Contains("--keep", StringComparer.OrdinalIgnoreCase);
         var client = new BrokerClient();
 

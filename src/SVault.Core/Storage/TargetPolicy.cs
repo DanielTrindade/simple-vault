@@ -37,7 +37,8 @@ public static class TargetPolicy
             return false;
         }
 
-        if (!string.Equals(allowedUri.Scheme, targetUri.Scheme, StringComparison.OrdinalIgnoreCase) ||
+        if (!IsClean(allowedUri) || !IsClean(targetUri) ||
+            !string.Equals(allowedUri.Scheme, targetUri.Scheme, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(allowedUri.Host, targetUri.Host, StringComparison.OrdinalIgnoreCase) ||
             allowedUri.Port != targetUri.Port)
         {
@@ -45,15 +46,36 @@ public static class TargetPolicy
         }
 
         var allowedPath = allowedUri.AbsolutePath.TrimEnd('/');
-        if (allowedPath.Length == 0)
+        var targetPath = targetUri.AbsolutePath.TrimEnd('/');
+        var pathMatches = allowedPath.Length == 0 ||
+                          targetPath.Equals(allowedPath, StringComparison.Ordinal) ||
+                          targetPath.StartsWith(allowedPath + "/", StringComparison.Ordinal);
+        if (!pathMatches)
         {
-            return true;
+            return false;
         }
 
-        var targetPath = targetUri.AbsolutePath.TrimEnd('/');
-        return targetPath.Equals(allowedPath, StringComparison.OrdinalIgnoreCase) ||
-               targetPath.StartsWith(allowedPath + "/", StringComparison.OrdinalIgnoreCase);
+        var allowedQuery = allowedUri.Query;
+        return allowedQuery.Length == 0 || string.Equals(allowedQuery, targetUri.Query, StringComparison.Ordinal);
     }
+
+    public static bool AreEquivalentUrls(string left, string right)
+    {
+        if (!Uri.TryCreate(left, UriKind.Absolute, out var leftUri) ||
+            !Uri.TryCreate(right, UriKind.Absolute, out var rightUri) ||
+            !IsClean(leftUri) || !IsClean(rightUri))
+        {
+            return false;
+        }
+
+        return string.Equals(leftUri.Scheme, rightUri.Scheme, StringComparison.OrdinalIgnoreCase) &&
+               string.Equals(leftUri.Host, rightUri.Host, StringComparison.OrdinalIgnoreCase) &&
+               leftUri.Port == rightUri.Port &&
+               string.Equals(leftUri.AbsolutePath, rightUri.AbsolutePath, StringComparison.Ordinal) &&
+               string.Equals(leftUri.Query, rightUri.Query, StringComparison.Ordinal);
+    }
+
+    private static bool IsClean(Uri uri) => string.IsNullOrEmpty(uri.UserInfo) && string.IsNullOrEmpty(uri.Fragment);
 
     private static bool PathCovers(string allowed, string target)
     {

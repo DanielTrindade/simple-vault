@@ -27,6 +27,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'SVaultRollback.ps1')
 
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -58,11 +59,30 @@ function Copy-Tree {
         $targetDir = Split-Path -Parent $target
         if (-not (Test-Path -LiteralPath $targetDir)) { New-Item -ItemType Directory -Path $targetDir -Force | Out-Null }
 
-        try {
-            Copy-Item -LiteralPath $file.FullName -Destination $target -Force
-        }
-        catch {
-            Write-Warning "Nao foi possivel atualizar $relative (arquivo em uso). A versao atual continuara em uso ate a proxima execucao."
+        Copy-Item -LiteralPath $file.FullName -Destination $target -Force -ErrorAction Stop
+    }
+}
+
+function Invoke-NativeChecked {
+    param([string]$File, [string[]]$Arguments)
+
+    $output = & $File @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Falha em $File (codigo $LASTEXITCODE): $output" }
+}
+
+function Assert-RestrictedAcl {
+    param([string]$Root, [hashtable]$AllowedRights)
+
+    $paths = @((Get-Item -LiteralPath $Root)) + @(Get-ChildItem -LiteralPath $Root -Force -Recurse)
+    foreach ($item in $paths) {
+        $acl = Get-Acl -LiteralPath $item.FullName
+        foreach ($rule in $acl.Access) {
+            $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+            if (-not $AllowedRights.ContainsKey($sid) -or $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) {
+                throw "ACL inesperada em $($item.FullName): $sid"
+            }
+            $rights = [Security.AccessControl.FileSystemRights]$rule.FileSystemRights
+            if (($rights -band $AllowedRights[$sid]) -ne $rights) { throw "Permissao ACL excessiva em $($item.FullName): $sid" }
         }
     }
 }
@@ -76,6 +96,18 @@ Write-Host "Instalacao        : $InstallRoot"
 Write-Host "Dados             : $DataRoot"
 
 $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if ($null -ne $existingService) {
+    $serviceDetails = Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceName'"
+    $servicePath = [regex]::Match($serviceDetails.PathName, '^\s*(?:"([^"]+)"|(\S+))').Groups[1].Value
+    if ([string]::IsNullOrWhiteSpace($servicePath)) { $servicePath = [regex]::Match($serviceDetails.PathName, '^\s*(\S+)').Groups[1].Value }
+    $expectedServicePath = [IO.Path]::GetFullPath((Join-Path $InstallRoot 'svault-broker.exe'))
+    if (-not [string]::Equals([IO.Path]::GetFullPath($servicePath), $expectedServicePath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "O servico $ServiceName aponta para outro broker: $servicePath"
+    }
+    if ($serviceDetails.StartName -notin @('LocalSystem', 'NT AUTHORITY\SYSTEM')) {
+        throw "O servico $ServiceName nao esta configurado para LocalSystem."
+    }
+}
 
 # 1. Publicacao dos binarios
 $publishRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'artifacts\publish'
@@ -85,42 +117,73 @@ Publish-Project -Project (Join-Path $SourceRoot 'SVault.Broker\SVault.Broker.csp
 Publish-Project -Project (Join-Path $SourceRoot 'SVault.Cli\SVault.Cli.csproj') -Output (Join-Path $publishRoot 'cli')
 Publish-Project -Project (Join-Path $SourceRoot 'SVault.Manager\SVault.Manager.csproj') -Output (Join-Path $publishRoot 'manager')
 
-# 2. Copia para o local final
-if ($null -ne $existingService -and $existingService.Status -ne 'Stopped') {
-    Write-Host "Parando o servico $ServiceName para atualizar os binarios ..."
-    Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+# 2. Prepara e valida uma release completa antes de alterar o servico
+$installParent = Split-Path -Parent ([IO.Path]::GetFullPath($InstallRoot))
+if (-not (Test-Path -LiteralPath $installParent)) { New-Item -ItemType Directory -Path $installParent -Force | Out-Null }
+$releaseStage = Join-Path $installParent ('.SVault-stage-' + [guid]::NewGuid().ToString('N'))
+$releaseBackup = Join-Path $installParent ('.SVault-backup-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $releaseStage -Force | Out-Null
+Copy-Tree -Source (Join-Path $publishRoot 'broker') -Destination $releaseStage
+Copy-Tree -Source (Join-Path $publishRoot 'cli') -Destination $releaseStage
+Copy-Tree -Source (Join-Path $publishRoot 'manager') -Destination $releaseStage
+
+$mcpStage = Join-Path $releaseStage 'mcp'
+Copy-Item -LiteralPath (Join-Path $SourceRoot 'svault-mcp') -Destination $mcpStage -Recurse -Force -ErrorAction Stop
+if (Test-Path -LiteralPath (Join-Path $mcpStage 'node_modules')) {
+    Remove-Item -LiteralPath (Join-Path $mcpStage 'node_modules') -Recurse -Force
+}
+$nodePath = (Get-Command node -ErrorAction SilentlyContinue).Source
+if (-not $nodePath) { throw 'Node.js e necessario para validar e instalar o servidor MCP.' }
+Push-Location $mcpStage
+try {
+    & npm ci --omit=dev
+    if ($LASTEXITCODE -ne 0) { throw 'Falha ao instalar as dependencias de producao do MCP.' }
+    & $nodePath --check (Join-Path $mcpStage 'index.mjs')
+    if ($LASTEXITCODE -ne 0) { throw 'Falha na verificacao de sintaxe do MCP.' }
+    & $nodePath --input-type=module -e "import('@modelcontextprotocol/sdk/server/index.js').then(() => process.exit(0)).catch(() => process.exit(1))"
+    if ($LASTEXITCODE -ne 0) { throw 'Falha no smoke de importacao do SDK MCP.' }
+}
+finally {
+    Pop-Location
+}
+
+foreach ($required in @('svault-broker.exe', 'svaultctl.exe', 'SVaultManager.exe', 'mcp\index.mjs', 'mcp\node_modules\@modelcontextprotocol\sdk\package.json')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $releaseStage $required) -PathType Leaf)) { throw "Arquivo obrigatorio ausente na release: $required" }
+}
+
+$hadInstallRoot = Test-Path -LiteralPath $InstallRoot
+$oldMovedToBackup = $false
+$installActivated = $false
+$wasServiceRunning = $null -ne $existingService -and $existingService.Status -eq 'Running'
+$serviceCreated = $false
+$brokerConfigPath = Join-Path $DataRoot 'broker.json'
+$hadBrokerConfig = Test-Path -LiteralPath $brokerConfigPath
+$originalBrokerConfig = if ($hadBrokerConfig) { [IO.File]::ReadAllBytes($brokerConfigPath) } else { $null }
+$serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+$serviceEnvironment = Get-ItemProperty -Path $serviceKey -Name 'Environment' -ErrorAction SilentlyContinue
+$hadServiceEnvironment = $null -ne $serviceEnvironment
+$originalServiceEnvironment = if ($hadServiceEnvironment) { @($serviceEnvironment.Environment) } else { @() }
+$originalDataAcls = @()
+if (Test-Path -LiteralPath $DataRoot) {
+    $dataPaths = @((Get-Item -LiteralPath $DataRoot)) + @(Get-ChildItem -LiteralPath $DataRoot -Force -Recurse)
+    foreach ($path in $dataPaths) { $originalDataAcls += [pscustomobject]@{ Path = $path.FullName; Acl = Get-Acl -LiteralPath $path.FullName } }
+}
+try {
+if ($wasServiceRunning) {
+    Write-Host "Parando o servico $ServiceName para ativar a release validada ..."
+    Stop-Service -Name $ServiceName -Force
     Start-Sleep -Seconds 2
 }
 
-if (-not (Test-Path -LiteralPath $InstallRoot)) { New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null }
-Copy-Tree -Source (Join-Path $publishRoot 'broker') -Destination $InstallRoot
-Copy-Tree -Source (Join-Path $publishRoot 'cli') -Destination $InstallRoot
-Copy-Tree -Source (Join-Path $publishRoot 'manager') -Destination $InstallRoot
-
-# 3. Skill para os agentes
-$skillSource = Join-Path (Split-Path -Parent $PSScriptRoot) 'skills\svault\SKILL.md'
-if (Test-Path -LiteralPath $skillSource) {
-    $skillTargets = @(
-        (Join-Path $env:USERPROFILE '.claude\skills\svault\SKILL.md'),
-        (Join-Path $env:USERPROFILE '.config\opencode\skills\svault\SKILL.md'),
-        (Join-Path $env:USERPROFILE '.codex\skills\svault\SKILL.md')
-    )
-
-    foreach ($target in $skillTargets) {
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
-        Copy-Item -LiteralPath $skillSource -Destination $target -Force
-    }
-    Write-Host "Skill 'svault' instalada em: Claude Code, OpenCode e Codex"
+if ($hadInstallRoot) {
+    Move-Item -LiteralPath $InstallRoot -Destination $releaseBackup -ErrorAction Stop
+    $oldMovedToBackup = $true
 }
+Move-Item -LiteralPath $releaseStage -Destination $InstallRoot -ErrorAction Stop
+$installActivated = $true
 
 # 4. Servidor MCP
-$mcpSource = Join-Path $SourceRoot 'svault-mcp'
 $mcpTarget = Join-Path $InstallRoot 'mcp'
-if (Test-Path -LiteralPath $mcpTarget) { Remove-Item -LiteralPath $mcpTarget -Recurse -Force }
-Copy-Item -LiteralPath $mcpSource -Destination $mcpTarget -Recurse -Force
-
-$nodePath = (Get-Command node -ErrorAction SilentlyContinue).Source
-if (-not $nodePath) { $nodePath = 'node' }
 
 $mcpLauncher = Join-Path $InstallRoot 'svault-mcp.cmd'
 @(
@@ -136,22 +199,14 @@ foreach ($sub in @('state', 'logs')) {
     if (-not (Test-Path -LiteralPath $path)) { New-Item -ItemType Directory -Path $path -Force | Out-Null }
 }
 
-# 6. Conta de servico
-# O broker roda como LocalSystem: nao exige "Log on as a service" (que a politica local
-# bloqueada por GPO impede conceder via secedit/LSA neste tipo de maquina).
-# O isolamento dos valores nao depende da conta: eles ficam cifrados por AES-256-GCM
-# com a chave derivada da senha do cofre, dentro do Credential Manager do SYSTEM.
-$existingUser = Get-LocalUser -Name $LegacyServiceAccount -ErrorAction SilentlyContinue
-if ($null -ne $existingUser) {
-    Write-Host "Removendo a conta $LegacyServiceAccount (nao e mais necessaria) ..."
-    Remove-LocalUser -Name $LegacyServiceAccount -ErrorAction SilentlyContinue
-}
-Write-Host "Conta de servico  : LocalSystem (sem conta dedicada)"
-
 # 7. ACLs
 Write-Host 'Aplicando ACLs ...'
-& icacls.exe $InstallRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
-& icacls.exe $DataRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$userSid`:(OI)(CI)RX" | Out-Null
+Invoke-NativeChecked -File 'icacls.exe' -Arguments @($InstallRoot, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX')
+Invoke-NativeChecked -File 'icacls.exe' -Arguments @($DataRoot, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', "*$userSid`:(OI)(CI)RX")
+$readRights = [Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize -bor [Security.AccessControl.FileSystemRights]::ReadAttributes -bor [Security.AccessControl.FileSystemRights]::ReadExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::ReadPermissions -bor [Security.AccessControl.FileSystemRights]::ListDirectory
+$fullRights = [Security.AccessControl.FileSystemRights]::FullControl
+Assert-RestrictedAcl -Root $InstallRoot -AllowedRights @{ 'S-1-5-18' = $fullRights; 'S-1-5-32-544' = $fullRights; 'S-1-5-32-545' = $readRights }
+Assert-RestrictedAcl -Root $DataRoot -AllowedRights @{ 'S-1-5-18' = $fullRights; 'S-1-5-32-544' = $fullRights; $userSid = $readRights }
 
 # 8. Configuracao do broker
 $brokerConfig = @{
@@ -167,14 +222,6 @@ Set-Content -LiteralPath (Join-Path $DataRoot 'broker.json') -Value $brokerConfi
 # C:\SVault e o diretorio de dados chega ao processo pela variavel de ambiente do servico.
 $binPath = "$InstallRoot\svault-broker.exe"
 
-if ($null -ne $existingService) {
-    Write-Host "Removendo o servico existente $ServiceName ..."
-    if ($existingService.Status -ne 'Stopped') { Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue }
-    & sc.exe delete $ServiceName | Out-Null
-    Start-Sleep -Seconds 2
-    $existingService = $null
-}
-
 if ($null -eq $existingService) {
     Write-Host "Registrando o servico $ServiceName ..."
     Write-Host "  binPath: $binPath"
@@ -182,16 +229,17 @@ if ($null -eq $existingService) {
     if ($LASTEXITCODE -ne 0) {
         throw "Falha ao criar o servico: $scOutput"
     }
+    $serviceCreated = $true
 }
 
 # Variaveis de ambiente do servico (o SCM as injeta no processo)
-$serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
 New-ItemProperty -Path $serviceKey -Name 'Environment' -PropertyType MultiString -Value @("SVAULT_HOME=$DataRoot") -Force | Out-Null
 
-
-& sc.exe description $ServiceName "Broker de credenciais isolado do SVault. Executa como LocalSystem; os valores ficam cifrados pela senha do cofre." | Out-Null
-& sc.exe failure $ServiceName reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
-& sc.exe failureflag $ServiceName 1 | Out-Null
+if ($serviceCreated) {
+    Invoke-NativeChecked -File 'sc.exe' -Arguments @('description', $ServiceName, 'Broker de credenciais isolado do SVault. Executa como LocalSystem; os valores ficam cifrados pela senha do cofre.')
+    Invoke-NativeChecked -File 'sc.exe' -Arguments @('failure', $ServiceName, 'reset=', '86400', 'actions=', 'restart/60000/restart/60000/restart/60000')
+    Invoke-NativeChecked -File 'sc.exe' -Arguments @('failureflag', $ServiceName, '1')
+}
 Start-Sleep -Seconds 1
 
 # 10. Inicializacao e verificacao
@@ -202,6 +250,85 @@ $service = Get-Service -Name $ServiceName
 if ($service.Status -ne 'Running') {
     throw "O servico nao ficou em execucao. Estado: $($service.Status). Consulte $DataRoot\logs\svault-broker.log"
 }
+
+& (Join-Path $InstallRoot 'svaultctl.exe') health
+if ($LASTEXITCODE -ne 0) { throw 'A verificacao do protocolo broker health falhou.' }
+& $nodePath (Join-Path (Split-Path -Parent $PSScriptRoot) 'tests\mcp-smoke.mjs') (Join-Path $InstallRoot 'svault-broker.exe') (Join-Path $InstallRoot 'mcp\index.mjs')
+if ($LASTEXITCODE -ne 0) { throw 'O smoke MCP isolado falhou.' }
+
+}
+catch {
+    $failure = $_
+    $rollback = Invoke-SVaultRollback `
+        -HadPreviousRelease $hadInstallRoot `
+        -OldMovedToBackup $oldMovedToBackup `
+        -NewActivated $installActivated `
+        -WasServiceRunning $wasServiceRunning `
+        -StopNewService {
+            if ($serviceCreated) {
+                $stopFailure = $null
+                try { Invoke-NativeChecked -File 'sc.exe' -Arguments @('stop', $ServiceName) } catch { $stopFailure = $_ }
+                try { Invoke-NativeChecked -File 'sc.exe' -Arguments @('delete', $ServiceName) }
+                catch { if ($null -eq $stopFailure) { throw } }
+                if ($null -ne $stopFailure) { throw $stopFailure }
+            }
+            else { Stop-Service -Name $ServiceName -Force -ErrorAction Stop }
+        } `
+        -RestoreBrokerConfig {
+            if ($hadBrokerConfig) { [IO.File]::WriteAllBytes($brokerConfigPath, $originalBrokerConfig) }
+            elseif (Test-Path -LiteralPath $brokerConfigPath) { Remove-Item -LiteralPath $brokerConfigPath -Force -ErrorAction Stop }
+        } `
+        -RestoreServiceEnvironment {
+            if (-not $serviceCreated) {
+                if ($hadServiceEnvironment) { New-ItemProperty -Path $serviceKey -Name 'Environment' -PropertyType MultiString -Value $originalServiceEnvironment -Force | Out-Null }
+                else { Remove-ItemProperty -Path $serviceKey -Name 'Environment' -ErrorAction Stop }
+            }
+        } `
+        -RestoreDataAcls {
+            $aclFailures = [System.Collections.Generic.List[string]]::new()
+            foreach ($snapshot in $originalDataAcls) {
+                try { if (Test-Path -LiteralPath $snapshot.Path) { Set-Acl -LiteralPath $snapshot.Path -AclObject $snapshot.Acl -ErrorAction Stop } }
+                catch { $aclFailures.Add($_.Exception.GetType().Name) }
+            }
+            if ($aclFailures.Count -gt 0) { throw 'Falha em uma ou mais restauracoes de ACL.' }
+        } `
+        -RemoveActivatedRelease {
+            if (Test-Path -LiteralPath $InstallRoot) { Remove-Item -LiteralPath $InstallRoot -Recurse -Force -ErrorAction Stop }
+        } `
+        -TestInstallRoot { Test-Path -LiteralPath $InstallRoot } `
+        -RestorePreviousRelease {
+            if (-not (Test-Path -LiteralPath $releaseBackup)) { throw 'Backup da release anterior ausente.' }
+            Move-Item -LiteralPath $releaseBackup -Destination $InstallRoot -ErrorAction Stop
+        } `
+        -StartPreviousService { Start-Service -Name $ServiceName -ErrorAction Stop }
+    foreach ($stepFailure in $rollback.Failures) {
+        try { Write-Warning "Falha durante recuperacao ($stepFailure)." } catch { }
+    }
+    throw $failure
+}
+
+if (Test-Path -LiteralPath $releaseBackup) {
+    try { Remove-Item -LiteralPath $releaseBackup -Recurse -Force }
+    catch { Write-Warning "A release anterior foi mantida em $releaseBackup porque nao pode ser removida." }
+}
+
+# 3. Skill e conta antiga sao tratadas somente depois de validar a release ativa
+$skillSource = Join-Path (Split-Path -Parent $PSScriptRoot) 'skills\svault\SKILL.md'
+if (Test-Path -LiteralPath $skillSource) {
+    $skillTargets = @(
+        (Join-Path $env:USERPROFILE '.claude\skills\svault\SKILL.md'),
+        (Join-Path $env:USERPROFILE '.config\opencode\skills\svault\SKILL.md'),
+        (Join-Path $env:USERPROFILE '.codex\skills\svault\SKILL.md')
+    )
+
+    foreach ($target in $skillTargets) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        Copy-Item -LiteralPath $skillSource -Destination $target -Force -ErrorAction Stop
+    }
+}
+
+$existingUser = Get-LocalUser -Name $LegacyServiceAccount -ErrorAction SilentlyContinue
+if ($null -ne $existingUser) { Remove-LocalUser -Name $LegacyServiceAccount -ErrorAction SilentlyContinue }
 
 Write-Host ''
 Write-Host 'Instalacao concluida.'

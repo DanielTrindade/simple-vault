@@ -96,6 +96,9 @@ public sealed record OperationSummary
     public string Target { get; init; } = string.Empty;
     public bool RequiresApproval { get; init; }
     public string Description { get; init; } = string.Empty;
+    public Dictionary<string, string> Parameters { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+    public string? Method { get; init; }
+    public string[] ReferencedEntries { get; init; } = Array.Empty<string>();
 }
 
 public sealed record OperationRequestResult
@@ -138,6 +141,7 @@ public static class OperationStatuses
     public const string Failed = "failed";
     public const string Rejected = "rejected";
     public const string Expired = "expired";
+    public const string Revoked = "revoked";
 }
 
 public static class ApprovalRequirements

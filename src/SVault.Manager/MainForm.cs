@@ -489,6 +489,27 @@ internal sealed class MainForm : Form
 
         try
         {
+            var request = await _client.OperationStatusAsync(requestId);
+            var summary = request.Summary;
+            var parameters = summary.Parameters.Count == 0
+                ? "(nenhum)"
+                : string.Join(Environment.NewLine, summary.Parameters.Select(pair => $"{pair.Key} = {pair.Value}"));
+            var auxiliary = summary.ReferencedEntries.Length == 0
+                ? "(nenhum)"
+                : string.Join(", ", summary.ReferencedEntries);
+            var effect = $"Operacao: {summary.OperationId}{Environment.NewLine}" +
+                         $"Descricao: {summary.Description}{Environment.NewLine}" +
+                         $"Acao: {summary.Method ?? summary.Action}{Environment.NewLine}" +
+                         $"Destino: {summary.Target}{Environment.NewLine}" +
+                         $"Registro principal: {summary.EntryId}{Environment.NewLine}" +
+                         $"Registros auxiliares: {auxiliary}{Environment.NewLine}" +
+                         $"Parametros:{Environment.NewLine}{parameters}{Environment.NewLine}{Environment.NewLine}" +
+                         "Aprovar esta execucao?";
+            if (MessageBox.Show(this, effect, "Revisar execucao", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+            {
+                return;
+            }
+
             using var prompt = new SecretPromptDialog(
                 "Aprovar operacao",
                 $"Digite a senha do cofre para autorizar a execucao e{( _totpEnabled ? " o codigo TOTP" : string.Empty)}.",
@@ -501,7 +522,9 @@ internal sealed class MainForm : Form
 
             var result = await _client.ApproveAsync(requestId, prompt.Passphrase, prompt.Totp);
             _status.Text = $"Solicitacao {requestId}: {result.Status}.";
-            _status.ForeColor = result.Status == OperationStatuses.Completed ? Theme.Success : Theme.Danger;
+            _status.ForeColor = result.Status == OperationStatuses.Completed && result.Result?.Ok == true
+                ? Theme.Success
+                : Theme.Danger;
 
             if (result.Result is not null)
             {

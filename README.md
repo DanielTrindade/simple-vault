@@ -20,7 +20,7 @@ executa a operação com o segredo e devolve apenas um **resultado sanitizado**.
 | MCP no Claude Code | `~/.claude.json` (escopo user) → `svault` |
 | MCP no Codex | `~/.codex/config.toml` → `[mcp_servers.svault]` |
 | Cofre | **não inicializado** — falta você definir a senha do cofre |
-| Testes | broker 23/23, MCP 9/9, demo ponta a ponta com dados fictícios |
+| Testes do código desta branch | broker 40/40, MCP 9/9, rollback simulado 6/6; validações complementares documentadas |
 
 **Próximo passo (você, fora do contexto do agente):**
 
@@ -144,8 +144,7 @@ Ou use a interface gráfica:
 ```
 
 - `--action http.request` → faz um POST no alvo fixo, injetando o segredo no corpo.
-- `--action process.stdin` → executa um programa fixo e escreve o segredo na **entrada padrão**
-  (nunca em argumento de linha de comando, que é visível a qualquer processo).
+- `process.stdin` está desabilitado no broker até existir execução sob identidade restrita com validação de executável, dependências e destino. Operações `process.stdin` já cadastradas também são recusadas.
 - `--action noop.echo` → diagnóstico: devolve o segredo mascarado, sem tocar na rede.
 
 Placeholders aceitos nos templates:
@@ -251,12 +250,24 @@ Log de auditoria (sem segredos): `C:\ProgramData\SVault\logs\svault-broker.log`.
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tests\run-smoke.ps1
 node .\tests\mcp-smoke.mjs .\artifacts\broker\svault-broker.exe .\src\svault-mcp\index.mjs
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\InstallRollback.SmokeTest.ps1
 ```
 
-O teste do broker sobe uma instância isolada (diretório temporário, pipe próprio, servidor
-HTTP local que ecoa o corpo recebido) e valida 23 comportamento, entre eles: o valor nunca
-aparece em resposta, log ou estado; senha errada é recusada; alvo não autorizado é recusado;
-segredo literal em template é recusado; TOTP é exigido quando habilitado.
+O teste do broker sobe uma instância isolada com armazenamento de credenciais em memória,
+diretório temporário, pipe próprio e servidor HTTP local. Os 40 cenários cobrem fluxos de
+aprovação, revogação, rotação, sanitização e validação de destinos. O teste de rollback usa
+ações simuladas e não instala o produto nem altera serviços ou permissões reais.
+
+### Revisão e validações pendentes
+
+- [Levantamento original](docs/REVISAO-LOGICA-NEGOCIO-2026-10-20.md).
+- [Correções e evidências](docs/IMPLEMENTACAO-REVISAO-2026-10-20.md).
+- [Parecer independente e reavaliação final](docs/VALIDACAO-REVISAO-2026-10-20.md#9-adendo--reavaliação-da-primeira-rodada-de-correções).
+- [Pendências de validação, impactos e critérios de conclusão](docs/PENDENCIAS-VALIDACAO.md).
+
+As seis pendências A02, A13, A15, A22, A23 e A24 têm alterações implementadas e validação
+complementar em aberto. A02 e A24 têm prioridade antes de distribuir ou atualizar instalações
+com credenciais importantes. As mudanças desta branch não foram instaladas no ambiente real.
 
 ---
 

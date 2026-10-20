@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using SVault.Core.Protocol;
 using SVault.Core.Redaction;
 using SVault.Core.Storage;
@@ -37,8 +38,7 @@ public static class OperationEngine
     public static readonly string[] SupportedActions =
     {
         ActionNoopEcho,
-        ActionHttpRequest,
-        ActionProcessStdin
+        ActionHttpRequest
     };
 
     /// <summary>Extrai os identificadores referenciados por {{secret:ID}} nos templates da operacao.</summary>
@@ -90,7 +90,7 @@ public static class OperationEngine
         {
             ActionNoopEcho => ExecuteEcho(context),
             ActionHttpRequest => await ExecuteHttpAsync(context).ConfigureAwait(false),
-            ActionProcessStdin => await ExecuteProcessAsync(context).ConfigureAwait(false),
+            ActionProcessStdin => throw new OperationFailure("Acoes de processo estao desabilitadas pelo contrato de seguranca atual."),
             _ => throw new OperationFailure("Acao nao suportada: " + context.Operation.Action)
         };
 
@@ -114,6 +114,11 @@ public static class OperationEngine
     {
         var spec = context.Operation.Http
                    ?? throw new OperationFailure("Operacao http.request sem especificacao.");
+
+        if (!TargetPolicy.AreEquivalentUrls(spec.Url, context.Operation.Target))
+        {
+            throw new OperationFailure("URL efetiva diferente do alvo autorizado.");
+        }
 
         if (!Uri.TryCreate(spec.Url, UriKind.Absolute, out var uri))
         {
@@ -227,7 +232,7 @@ public static class OperationEngine
         }
         catch (JsonException)
         {
-            return redactor.Redact(raw);
+            throw new OperationFailure("A resposta nao permite aplicar a selecao de campos configurada.");
         }
     }
 
@@ -321,33 +326,64 @@ public static class OperationEngine
 
     public static string ResolveTemplate(string template, OperationContext context)
     {
-        if (string.Equals(template, PlaceholderSecret, StringComparison.Ordinal))
-        {
-            return context.SecretText;
-        }
+        ValidateTemplate(template, context.Operation.Params);
 
-        if (template.StartsWith(SecretPrefix, StringComparison.Ordinal) && template.EndsWith("}}", StringComparison.Ordinal))
+        return Regex.Replace(template, @"\{\{(secret(?::[^{}]+)?|param:[^{}]+)\}\}", match =>
         {
-            var id = template[SecretPrefix.Length..^2].Trim();
-            if (context.ReferencedSecrets.TryGetValue(id, out var value))
+            var token = match.Groups[1].Value;
+            if (string.Equals(token, "secret", StringComparison.Ordinal))
             {
-                return Encoding.UTF8.GetString(value);
+                return context.SecretText;
             }
 
-            throw new OperationFailure("Segredo referenciado nao autorizado: " + id);
-        }
+            if (token.StartsWith("secret:", StringComparison.Ordinal))
+            {
+                var id = token["secret:".Length..].Trim();
+                return context.ReferencedSecrets.TryGetValue(id, out var value)
+                    ? Encoding.UTF8.GetString(value)
+                    : throw new OperationFailure("Segredo referenciado nao autorizado: " + id);
+            }
 
-        if (template.StartsWith(ParamPrefix, StringComparison.Ordinal) && template.EndsWith("}}", StringComparison.Ordinal))
+            var name = token["param:".Length..].Trim();
+            return context.Parameters.TryGetValue(name, out var parameter)
+                ? parameter
+                : throw new OperationFailure("Parametro obrigatorio ausente: " + name);
+        });
+    }
+
+    public static void ValidateTemplates(OperationRecord operation)
+    {
+        var templates = operation.Http is null
+            ? Array.Empty<string>()
+            : operation.Http.BodyFields.Values.Concat(operation.Http.Headers.Values).ToArray();
+
+        foreach (var template in templates)
         {
-            var name = template[ParamPrefix.Length..^2];
-            return context.Parameters.TryGetValue(name, out var value) ? value : string.Empty;
+            ValidateTemplate(template, operation.Params);
+        }
+    }
+
+    private static void ValidateTemplate(string template, IReadOnlyList<string> declaredParameters)
+    {
+        var remainder = Regex.Replace(template, @"\{\{(secret(?::[^{}]+)?|param:[^{}]+)\}\}", string.Empty);
+        if (remainder.Contains("{{", StringComparison.Ordinal) || remainder.Contains("}}", StringComparison.Ordinal))
+        {
+            throw new OperationFailure("Template contem placeholder invalido.");
         }
 
-        return template;
+        foreach (Match match in Regex.Matches(template, @"\{\{param:([^{}]+)\}\}"))
+        {
+            var name = match.Groups[1].Value.Trim();
+            if (name.Length == 0 || !declaredParameters.Contains(name, StringComparer.OrdinalIgnoreCase))
+            {
+                throw new OperationFailure("Template usa parametro nao declarado.");
+            }
+        }
     }
 
     public static void ValidateParameters(OperationRecord operation, IReadOnlyDictionary<string, string> parameters)
     {
+        ValidateTemplates(operation);
         foreach (var (name, value) in parameters)
         {
             if (!operation.Params.Contains(name, StringComparer.OrdinalIgnoreCase))
@@ -363,6 +399,21 @@ public static class OperationEngine
             if (value.Any(char.IsControl))
             {
                 throw new OperationFailure($"Parametro invalido: {name}");
+            }
+        }
+
+        var required = operation.Http is null
+            ? Array.Empty<string>()
+            : operation.Http.BodyFields.Values.Concat(operation.Http.Headers.Values)
+                .SelectMany(template => Regex.Matches(template, @"\{\{param:([^{}]+)\}\}").Cast<Match>())
+                .Select(match => match.Groups[1].Value.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        foreach (var name in required)
+        {
+            if (!parameters.TryGetValue(name, out var value) || string.IsNullOrWhiteSpace(value))
+            {
+                throw new OperationFailure("Parametro obrigatorio ausente: " + name);
             }
         }
     }

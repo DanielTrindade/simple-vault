@@ -235,7 +235,8 @@ async Task<int> RunAsync(string[] args)
 
             foreach (var request in pending.Requests)
             {
-                Console.WriteLine($"{request.RequestId}  {request.Summary.OperationId}  {request.Summary.EntryId}  {request.Summary.Target}  expira {request.ExpiresAt}");
+                var parameters = string.Join(", ", request.Summary.Parameters.Select(pair => $"{pair.Key}={pair.Value}"));
+                Console.WriteLine($"{request.RequestId}  {request.Summary.OperationId}  {request.Summary.EntryId}  {request.Summary.Method ?? request.Summary.Action}  {request.Summary.Target}  [{parameters}]  expira {request.ExpiresAt}");
             }
 
             return 0;
@@ -267,7 +268,7 @@ async Task<int> RunAsync(string[] args)
                 Console.WriteLine($"erro    : {result.Error}");
             }
 
-            return 0;
+            return result.Status == OperationStatuses.Completed && result.Result?.Ok == true ? 0 : 4;
         }
 
         case "reject":
@@ -296,14 +297,14 @@ async Task<int> RunAsync(string[] args)
                 Console.WriteLine($"erro      : {status.Error}");
             }
 
-            return 0;
+            return status.Status == OperationStatuses.Completed && status.Result?.Ok == true ? 0 : 4;
         }
 
         case "set-totp":
         {
             var secret = Require(options, "secret").Replace(" ", string.Empty).ToUpperInvariant();
             var passphrase = SecureInput.ReadSecret("Senha do cofre: ");
-            await client.SetTotpAsync(secret, passphrase);
+            await client.SetTotpAsync(secret, passphrase, await ReadAdminTotpAsync(client, options));
             Console.WriteLine("TOTP ativado.");
             return 0;
         }
@@ -311,7 +312,7 @@ async Task<int> RunAsync(string[] args)
         case "disable-totp":
         {
             var passphrase = SecureInput.ReadSecret("Senha do cofre: ");
-            await client.DisableTotpAsync(passphrase);
+            await client.DisableTotpAsync(passphrase, await ReadAdminTotpAsync(client, options));
             Console.WriteLine("TOTP desativado.");
             return 0;
         }
@@ -327,7 +328,7 @@ async Task<int> RunAsync(string[] args)
                 return 2;
             }
 
-            await client.ChangePassphraseAsync(current, next);
+            await client.ChangePassphraseAsync(current, next, await ReadAdminTotpAsync(client, options));
             Console.WriteLine("Senha do cofre alterada.");
             return 0;
         }
@@ -338,7 +339,7 @@ async Task<int> RunAsync(string[] args)
         case "reset":
         {
             var passphrase = SecureInput.ReadSecret("Senha do cofre: ");
-            var result = await client.ResetVaultAsync(passphrase);
+            var result = await client.ResetVaultAsync(passphrase, await ReadAdminTotpAsync(client, options));
             Console.WriteLine($"Cofre reiniciado. {result.EntriesRemoved} registro(s) removido(s).");
             Console.WriteLine("Use 'svaultctl init --totp' para definir uma nova senha do cofre.");
             return 0;
@@ -410,7 +411,15 @@ static Dictionary<string, string> ParseOptions(string[] args)
             i++;
         }
 
-        options[key] = value;
+        if (options.TryGetValue(key, out var previous) &&
+            new[] { "param", "param-value", "body", "header" }.Contains(key, StringComparer.OrdinalIgnoreCase))
+        {
+            options[key] = previous + "," + value;
+        }
+        else
+        {
+            options[key] = value;
+        }
     }
 
     return options;
@@ -422,6 +431,20 @@ static string Opt(IReadOnlyDictionary<string, string> options, string key, strin
 
 static string? OptNullable(IReadOnlyDictionary<string, string> options, string key) =>
     options.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value : null;
+
+static async Task<string?> ReadAdminTotpAsync(BrokerClient client, IReadOnlyDictionary<string, string> options)
+{
+    var provided = OptNullable(options, "totp");
+    if (provided is not null)
+    {
+        return provided;
+    }
+
+    return (await client.HealthAsync()).TotpRequired
+        ? SecureInput.ReadSecret("Codigo TOTP atual: ")
+        : null;
+}
+
 static string Require(IReadOnlyDictionary<string, string> options, string key) =>
     options.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value)
         ? value
@@ -440,7 +463,7 @@ static Dictionary<string, string> ParseMap(string value)
         return map;
     }
 
-    foreach (var pair in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+    foreach (var pair in value.Split(new[] { ',', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
     {
         var separator = pair.IndexOf('=');
         if (separator <= 0)
@@ -480,9 +503,9 @@ static void PrintUsage()
           approve --request ID [--totp CODIGO]     aprova e executa (exige a senha do cofre)
           reject --request ID                      rejeita uma solicitacao
           status --request ID                      mostra o resultado sanitizado
-          set-totp --secret BASE32                 ativa o segundo fator TOTP
-          disable-totp                             desativa o TOTP
-          change-passphrase                        troca a senha do cofre
+          set-totp --secret BASE32 [--totp CODIGO] ativa ou substitui o TOTP
+          disable-totp [--totp CODIGO]             desativa o TOTP
+          change-passphrase [--totp CODIGO]        troca a senha do cofre
           admin --action setup-service-account --account NOME
                                                  concede "Log on as a service" via API LSA
                                                  (necessario so se o broker rodar com conta dedicada)

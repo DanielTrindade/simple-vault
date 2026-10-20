@@ -19,3 +19,6 @@ Desktop.ini
 
 # Logs e artefatos locais
 *.log
+
+docs/tasks/
+docs/changes/

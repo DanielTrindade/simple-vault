@@ -199,7 +199,7 @@ internal sealed class AuthorizeDialog : Form
         ShowInTaskbar = false;
         BackColor = Theme.Surface;
         ForeColor = Theme.Text;
-        ClientSize = new Size(470, 520);
+        ClientSize = new Size(470, 620);
 
         var idLabel = Ui.Label("Identificador da operacao");
         idLabel.Location = new Point(20, 18);
@@ -226,7 +226,7 @@ internal sealed class AuthorizeDialog : Form
         _action.DropDownStyle = ComboBoxStyle.DropDownList;
         _action.Location = new Point(20, 138);
         _action.Width = 430;
-        _action.Items.AddRange(new object[] { "http.request", "process.stdin", "noop.echo" });
+        _action.Items.AddRange(new object[] { "http.request", "noop.echo" });
         _action.SelectedIndex = 0;
         _action.SelectedIndexChanged += (_, _) => TogglePanels();
 
@@ -246,7 +246,7 @@ internal sealed class AuthorizeDialog : Form
         _params.Width = 430;
 
         _httpPanel.Location = new Point(20, 318);
-        _httpPanel.Size = new Size(430, 110);
+        _httpPanel.Size = new Size(430, 235);
         _httpPanel.BackColor = Theme.Surface;
         BuildHttpPanel();
         _httpPanel.Visible = true;
@@ -258,11 +258,11 @@ internal sealed class AuthorizeDialog : Form
         _processPanel.Visible = false;
 
         var confirm = Ui.Primary("Autorizar");
-        confirm.Location = new Point(272, 462);
+        confirm.Location = new Point(272, 562);
         confirm.Click += (_, _) => Save();
 
         var cancel = Ui.Secondary("Cancelar");
-        cancel.Location = new Point(190, 462);
+        cancel.Location = new Point(190, 562);
         cancel.Click += (_, _) => DialogResult = DialogResult.Cancel;
 
         Controls.AddRange(new Control[]
@@ -325,21 +325,27 @@ internal sealed class AuthorizeDialog : Form
         _contentType.Width = 140;
         _contentType.Text = "application/json";
 
-        var bodyLabel = Ui.Label("Corpo (campo=valor, use {{secret}} e {{param:NOME}})");
-        bodyLabel.Location = new Point(242, 0);
-        _body.Location = new Point(242, 18);
-        _body.Width = 188;
+        var bodyLabel = Ui.Label("Corpo (campo=valor, um por linha; use {{secret}} e {{param:NOME}})");
+        bodyLabel.Location = new Point(0, 46);
+        _body.Location = new Point(0, 64);
+        _body.Width = 430;
+        _body.Height = 48;
+        _body.Multiline = true;
+        _body.ScrollBars = ScrollBars.Vertical;
         _body.Text = "password={{secret}}";
 
-        var headersLabel = Ui.Label("Cabecalhos (nome=valor)");
-        headersLabel.Location = new Point(0, 46);
-        _headers.Location = new Point(0, 64);
-        _headers.Width = 225;
+        var headersLabel = Ui.Label("Cabecalhos (nome=valor, um por linha)");
+        headersLabel.Location = new Point(0, 119);
+        _headers.Location = new Point(0, 137);
+        _headers.Width = 430;
+        _headers.Height = 48;
+        _headers.Multiline = true;
+        _headers.ScrollBars = ScrollBars.Vertical;
 
-        var resultLabel = Ui.Label("Campos de retorno (JSON)");
-        resultLabel.Location = new Point(235, 46);
-        _resultFields.Location = new Point(235, 64);
-        _resultFields.Width = 195;
+        var resultLabel = Ui.Label("Campos de retorno (JSON, separados por virgula)");
+        resultLabel.Location = new Point(0, 190);
+        _resultFields.Location = new Point(0, 208);
+        _resultFields.Width = 430;
 
         _httpPanel.Controls.AddRange(new Control[]
         {

@@ -1,4 +1,6 @@
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace SVault.Core.Redaction;
 
@@ -39,23 +41,14 @@ public sealed class SecretRedactor
                 Add(set, formatted);
             }
 
-            if (raw.Length >= 6)
-            {
-                Add(set, Uri.EscapeDataString(raw));
-                Add(set, Convert.ToBase64String(secret));
-            }
+            Add(set, Uri.EscapeDataString(raw));
+            Add(set, Convert.ToBase64String(secret));
 
-            if (raw.Length >= 8)
-            {
-                Add(set, raw.ToUpperInvariant());
-                Add(set, raw.ToLowerInvariant());
-            }
+            Add(set, raw.ToUpperInvariant());
+            Add(set, raw.ToLowerInvariant());
         }
 
-        _variants = set
-            .Where(v => v.Length >= 4)
-            .OrderByDescending(v => v.Length)
-            .ToArray();
+        _variants = set.OrderByDescending(v => v.Length).ToArray();
     }
 
     private static void Add(HashSet<string> set, string value)
@@ -73,16 +66,109 @@ public sealed class SecretRedactor
             return string.Empty;
         }
 
-        var result = text;
-        foreach (var variant in _variants)
+        try
         {
-            if (result.Contains(variant, StringComparison.Ordinal))
+            var node = JsonNode.Parse(text);
+            if (node is not null)
             {
-                result = result.Replace(variant, Mask, StringComparison.Ordinal);
+                var redacted = RedactNode(node);
+                return Truncate(redacted?.ToJsonString() ?? "null");
             }
         }
+        catch (JsonException)
+        {
+        }
 
-        return Truncate(result);
+        return Truncate(RedactText(text));
+    }
+
+    private JsonNode? RedactNode(JsonNode? node)
+    {
+        if (node is JsonObject obj)
+        {
+            var entries = obj.ToArray();
+            foreach (var (key, value) in entries)
+            {
+                var redactedKey = RedactText(key);
+                var redactedValue = RedactNode(value);
+                if (!string.Equals(key, redactedKey, StringComparison.Ordinal))
+                {
+                    obj.Remove(key);
+                    obj[redactedKey] = redactedValue;
+                }
+                else if (!ReferenceEquals(value, redactedValue))
+                {
+                    obj[key] = redactedValue;
+                }
+            }
+
+            return obj;
+        }
+
+        if (node is JsonArray array)
+        {
+            for (var i = 0; i < array.Count; i++)
+            {
+                var original = array[i];
+                var redacted = RedactNode(original);
+                if (!ReferenceEquals(original, redacted))
+                {
+                    array[i] = redacted;
+                }
+            }
+
+            return array;
+        }
+
+        if (node is JsonValue valueNode && valueNode.TryGetValue<string>(out var stringValue))
+        {
+            return JsonValue.Create(RedactText(stringValue));
+        }
+
+        if (node is JsonValue scalarNode && scalarNode.TryGetValue<JsonElement>(out var element) &&
+            element.ValueKind is JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False)
+        {
+            var raw = element.GetRawText();
+            var redacted = RedactText(raw);
+            return string.Equals(raw, redacted, StringComparison.Ordinal) ? node : JsonValue.Create(redacted);
+        }
+
+        return node;
+    }
+
+    private string RedactText(string text)
+    {
+        if (_variants.Length == 0 || text.Length == 0)
+        {
+            return text;
+        }
+
+        var builder = new StringBuilder(text.Length);
+        var index = 0;
+        while (index < text.Length)
+        {
+            var match = _variants.FirstOrDefault(variant =>
+                index + variant.Length <= text.Length && text.AsSpan(index, variant.Length).SequenceEqual(variant.AsSpan()));
+
+            if (text.AsSpan(index).StartsWith(Mask.AsSpan(), StringComparison.Ordinal) &&
+                (match is null || match.Length < Mask.Length))
+            {
+                builder.Append(Mask);
+                index += Mask.Length;
+                continue;
+            }
+
+            if (match is null)
+            {
+                builder.Append(text[index++]);
+                continue;
+            }
+
+            builder.Append(Mask);
+            index += match.Length;
+        }
+
+        return builder.ToString();
     }
 
     public string? RedactNullable(string? text) => text is null ? null : Redact(text);
