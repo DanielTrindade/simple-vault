@@ -1,0 +1,1 @@
+{"name":"svault-mcp","version":"1.0.0","private":true,"type":"module","description":"Servidor MCP do cofre SVault","main":"index.mjs","dependencies":{"@modelcontextprotocol/sdk":"^1.32.1"}}
