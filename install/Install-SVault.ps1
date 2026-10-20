@@ -22,6 +22,7 @@ param(
     [string]$InstallRoot = 'C:\SVault',
     [string]$DataRoot = 'C:\ProgramData\SVault',
     [string]$SourceRoot = (Join-Path $PSScriptRoot '..\src'),
+    [string]$CargoToolchain = '',
     [switch]$SkipBuild
 )
 
@@ -50,6 +51,32 @@ function Publish-Project {
     if ($LASTEXITCODE -ne 0) { throw "Falha ao publicar $Project" }
 }
 
+function Publish-RustManager {
+    param([string]$Crate, [string]$Output)
+
+    if ($SkipBuild) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Output 'SVaultManager.exe'))) { throw "Saida nao encontrada com -SkipBuild: $Output" }
+        return
+    }
+
+    $cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
+    if (-not $cargo) { throw 'Rust (cargo) e necessario para compilar o gerenciador.' }
+
+    Write-Host "Compilando $Crate ..."
+    $cargoArgs = @('build', '--release', '--locked', '--manifest-path', (Join-Path $Crate 'Cargo.toml'))
+    if ($CargoToolchain) { $cargoArgs = @("+$CargoToolchain") + $cargoArgs }
+    # O cargo escreve o progresso em stderr; com EAP=Stop e saida redirecionada (como faz o
+    # Install-SVault-Elevated.cmd), o Windows PowerShell transforma cada linha em erro fatal.
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $cargo @cargoArgs 2>&1 | ForEach-Object { Write-Host "$_" } }
+    finally { $ErrorActionPreference = $previousPreference }
+    if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar $Crate" }
+
+    New-Item -ItemType Directory -Path $Output -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $Crate 'target\release\svault-manager.exe') -Destination (Join-Path $Output 'SVaultManager.exe') -Force -ErrorAction Stop
+}
+
 function Copy-Tree {
     param([string]$Source, [string]$Destination)
 
@@ -68,6 +95,27 @@ function Invoke-NativeChecked {
 
     $output = & $File @Arguments 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Falha em $File (codigo $LASTEXITCODE): $output" }
+}
+
+function Remove-UnexpectedAces {
+    param([string]$Root, [string[]]$AllowedSids)
+
+    # icacls /grant:r so substitui as entradas dos SIDs listados; entradas explicitas de outros
+    # SIDs (como a conta svault_svc removida em instalacoes antigas) continuariam na arvore.
+    # O icacls /remove falha (1332) com SIDs orfaos, por isso a remocao usa a API de ACL.
+    $paths = @((Get-Item -LiteralPath $Root)) + @(Get-ChildItem -LiteralPath $Root -Force -Recurse)
+    foreach ($item in $paths) {
+        $acl = $item.GetAccessControl([Security.AccessControl.AccessControlSections]::Access)
+        $changed = $false
+        foreach ($rule in @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))) {
+            if ($rule.IdentityReference.Value -notin $AllowedSids) {
+                Write-Host "Removendo permissao nao prevista de $($rule.IdentityReference.Value) em $($item.FullName)"
+                [void]$acl.RemoveAccessRuleSpecific($rule)
+                $changed = $true
+            }
+        }
+        if ($changed) { $item.SetAccessControl($acl) }
+    }
 }
 
 function Assert-RestrictedAcl {
@@ -115,7 +163,7 @@ if (-not $SkipBuild -and (Test-Path -LiteralPath $publishRoot)) { Remove-Item -L
 
 Publish-Project -Project (Join-Path $SourceRoot 'SVault.Broker\SVault.Broker.csproj') -Output (Join-Path $publishRoot 'broker')
 Publish-Project -Project (Join-Path $SourceRoot 'SVault.Cli\SVault.Cli.csproj') -Output (Join-Path $publishRoot 'cli')
-Publish-Project -Project (Join-Path $SourceRoot 'SVault.Manager\SVault.Manager.csproj') -Output (Join-Path $publishRoot 'manager')
+Publish-RustManager -Crate (Join-Path $SourceRoot 'svault-manager') -Output (Join-Path $publishRoot 'manager')
 
 # 2. Prepara e valida uma release completa antes de alterar o servico
 $installParent = Split-Path -Parent ([IO.Path]::GetFullPath($InstallRoot))
@@ -203,6 +251,8 @@ foreach ($sub in @('state', 'logs')) {
 Write-Host 'Aplicando ACLs ...'
 Invoke-NativeChecked -File 'icacls.exe' -Arguments @($InstallRoot, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX')
 Invoke-NativeChecked -File 'icacls.exe' -Arguments @($DataRoot, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', "*$userSid`:(OI)(CI)RX")
+Remove-UnexpectedAces -Root $InstallRoot -AllowedSids @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-32-545')
+Remove-UnexpectedAces -Root $DataRoot -AllowedSids @('S-1-5-18', 'S-1-5-32-544', $userSid)
 $readRights = [Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize -bor [Security.AccessControl.FileSystemRights]::ReadAttributes -bor [Security.AccessControl.FileSystemRights]::ReadExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::ReadPermissions -bor [Security.AccessControl.FileSystemRights]::ListDirectory
 $fullRights = [Security.AccessControl.FileSystemRights]::FullControl
 Assert-RestrictedAcl -Root $InstallRoot -AllowedRights @{ 'S-1-5-18' = $fullRights; 'S-1-5-32-544' = $fullRights; 'S-1-5-32-545' = $readRights }

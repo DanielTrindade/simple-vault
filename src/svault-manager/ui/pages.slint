@@ -1,0 +1,1049 @@
+import { ListView, ScrollView } from "std-widgets.slint";
+import { Theme, Icons } from "theme.slint";
+import { Store } from "store.slint";
+import { Icon, Button, Field, FieldLabel, Pill, Kbd, KeyValue, EmptyState, Card, SectionTitle, Divider, Toggle } from "controls.slint";
+
+component PageHeader inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> subtitle;
+    spacing: 16px;
+    padding-bottom: 20px;
+    VerticalLayout {
+        horizontal-stretch: 1;
+        spacing: 4px;
+        alignment: center;
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: Theme.fs-2xl;
+            font-weight: 650;
+            font-family: Theme.font;
+        }
+        Text {
+            text: root.subtitle;
+            color: Theme.text-3;
+            font-size: Theme.fs;
+            font-family: Theme.font;
+            overflow: elide;
+        }
+    }
+    @children
+}
+
+component ActionIcon inherits Rectangle {
+    in property <string> action;
+    in property <length> size: 32px;
+    width: size;
+    height: size;
+    border-radius: size / 4;
+    background: action == "http.request" ? Theme.accent-soft : action == "process.stdin" ? Theme.warning-soft : Theme.surface-3;
+    Icon {
+        source: root.action == "http.request" ? Icons.globe : root.action == "process.stdin" ? Icons.terminal : Icons.echo;
+        tint: root.action == "http.request" ? Theme.accent : root.action == "process.stdin" ? Theme.warning : Theme.text-2;
+        size: root.size / 2;
+    }
+}
+
+component ColumnHeader inherits Text {
+    color: Theme.text-3;
+    font-size: Theme.fs-xs;
+    font-weight: 700;
+    font-family: Theme.font;
+    letter-spacing: 0.6px;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+component Cell inherits Text {
+    color: Theme.text;
+    font-size: Theme.fs;
+    font-family: Theme.font;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+component ApprovalCard inherits Rectangle {
+    in property <bool> selected;
+    in property <string> operation;
+    in property <string> entry;
+    in property <string> target;
+    in property <string> action;
+    in property <string> remaining;
+    in property <float> progress;
+    in property <bool> urgent;
+    callback clicked;
+    height: 92px;
+    border-radius: Theme.radius-lg;
+    background: selected ? Theme.surface-2 : touch.has-hover ? #181b21 : Theme.surface;
+    border-width: 1px;
+    border-color: selected ? #7c8cff80 : Theme.border;
+    clip: true;
+    animate background, border-color { duration: Theme.fast; }
+    accessible-role: list-item;
+    accessible-label: "Solicitação " + operation + ", expira em " + remaining;
+    accessible-item-selected: selected;
+    VerticalLayout {
+        padding: 14px;
+        padding-bottom: 12px;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 10px;
+            ActionIcon {
+                action: root.action;
+                size: 28px;
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: root.operation;
+                color: Theme.text;
+                font-size: Theme.fs-md;
+                font-weight: 600;
+                font-family: Theme.font;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Pill {
+                text: root.remaining;
+                tone: root.urgent ? "danger" : "warning";
+                icon: Icons.clock;
+                y: 3px;
+            }
+        }
+        Text {
+            text: root.entry + "  →  " + root.target;
+            color: Theme.text-3;
+            font-size: Theme.fs-sm;
+            font-family: Theme.mono;
+            overflow: elide;
+        }
+    }
+    Rectangle {
+        y: parent.height - 3px;
+        height: 3px;
+        background: Theme.surface-3;
+        Rectangle {
+            x: 0;
+            width: parent.width * Math.clamp(root.progress, 0, 1);
+            background: root.urgent ? Theme.danger : Theme.warning;
+            animate width { duration: 900ms; }
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component ApprovalsPage inherits VerticalLayout {
+    PageHeader {
+        title: "Aprovações";
+        subtitle: Store.approvals.length == 0
+            ? "Nenhuma solicitação aguardando decisão."
+            : Store.approvals.length == 1 ? "1 solicitação aguardando sua decisão." : Store.approvals.length + " solicitações aguardando sua decisão.";
+        Button {
+            text: "Atualizar";
+            icon: Icons.refresh;
+            shortcut: "F5";
+            y: (parent.height - self.height) / 2 - 10px;
+            clicked => { Store.refresh(); }
+        }
+    }
+
+    if Store.approvals.length == 0: Card {
+        vertical-stretch: 1;
+        EmptyState {
+            icon: Icons.shield;
+            title: "Tudo em ordem";
+            message: "Quando um agente pedir para usar um segredo, a solicitação aparece aqui e o ícone na barra de tarefas pisca.\nNada é executado sem a sua senha do cofre.";
+        }
+    }
+
+    if Store.approvals.length > 0: HorizontalLayout {
+        spacing: 16px;
+        vertical-stretch: 1;
+
+        VerticalLayout {
+            width: 340px;
+            spacing: 10px;
+            HorizontalLayout {
+                SectionTitle {
+                    text: "PENDENTES";
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: Store.approvals.length;
+                    color: Theme.text-3;
+                    font-size: Theme.fs-xs;
+                    font-weight: 700;
+                    horizontal-alignment: right;
+                }
+            }
+            ListView {
+                vertical-stretch: 1;
+                for request[i] in Store.approvals: VerticalLayout {
+                    padding-bottom: 8px;
+                    ApprovalCard {
+                        selected: i == Store.selected-approval;
+                        operation: request.operation;
+                        entry: request.entry;
+                        target: request.target;
+                        action: request.action;
+                        remaining: request.remaining;
+                        progress: request.progress;
+                        urgent: request.urgent;
+                        clicked => { Store.selected-approval = i; }
+                    }
+                }
+            }
+        }
+
+        Card {
+            horizontal-stretch: 1;
+            property <bool> valid: Store.selected-approval >= 0 && Store.selected-approval < Store.approvals.length;
+            VerticalLayout {
+                padding: 24px;
+                spacing: 20px;
+                HorizontalLayout {
+                    spacing: 14px;
+                    ActionIcon {
+                        action: Store.approvals[Store.selected-approval].action;
+                        size: 44px;
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 4px;
+                        alignment: center;
+                        Text {
+                            text: Store.approvals[Store.selected-approval].operation;
+                            color: Theme.text;
+                            font-size: Theme.fs-xl;
+                            font-weight: 650;
+                            font-family: Theme.font;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: Store.approvals[Store.selected-approval].description == "" ? "Sem descrição cadastrada." : Store.approvals[Store.selected-approval].description;
+                            color: Theme.text-3;
+                            font-size: Theme.fs;
+                            font-family: Theme.font;
+                            overflow: elide;
+                        }
+                    }
+                    Pill {
+                        text: Store.approvals[Store.selected-approval].action-label;
+                        tone: "accent";
+                        y: 11px;
+                    }
+                }
+
+                Divider { }
+
+                SectionTitle {
+                    text: "O QUE SERÁ EXECUTADO";
+                }
+                GridLayout {
+                    spacing-horizontal: 24px;
+                    spacing-vertical: 16px;
+                    Row {
+                        KeyValue {
+                            key: "DESTINO";
+                            value: Store.approvals[Store.selected-approval].target;
+                            mono: true;
+                        }
+                        KeyValue {
+                            key: "REGISTRO PRINCIPAL";
+                            value: Store.approvals[Store.selected-approval].entry;
+                            mono: true;
+                        }
+                    }
+                    Row {
+                        KeyValue {
+                            key: "REGISTROS AUXILIARES";
+                            value: Store.approvals[Store.selected-approval].auxiliary;
+                            mono: true;
+                        }
+                        KeyValue {
+                            key: "SOLICITADO EM";
+                            value: Store.approvals[Store.selected-approval].created;
+                        }
+                    }
+                }
+
+                SectionTitle {
+                    text: "PARÂMETROS ENVIADOS PELO AGENTE";
+                }
+                Rectangle {
+                    border-radius: Theme.radius;
+                    background: Theme.input;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 6px;
+                        if Store.approvals[Store.selected-approval].params.length == 0: Text {
+                            text: "Nenhum parâmetro.";
+                            color: Theme.text-3;
+                            font-size: Theme.fs;
+                            font-family: Theme.font;
+                        }
+                        for param in Store.approvals[Store.selected-approval].params: HorizontalLayout {
+                            spacing: 12px;
+                            Text {
+                                width: 160px;
+                                text: param.name;
+                                color: Theme.text-2;
+                                font-family: Theme.mono;
+                                font-size: Theme.fs;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: param.value;
+                                color: Theme.text;
+                                font-family: Theme.mono;
+                                font-size: Theme.fs;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+
+                Rectangle {
+                    border-radius: Theme.radius-lg;
+                    background: Theme.surface-2;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 12px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Icon {
+                                source: Icons.lock;
+                                tint: Theme.accent;
+                                size: 15px;
+                            }
+                            Text {
+                                text: "Confirme com a senha do cofre para executar";
+                                color: Theme.text;
+                                font-size: Theme.fs;
+                                font-weight: 600;
+                                font-family: Theme.font;
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            passphrase := Field {
+                                placeholder: "Senha do cofre";
+                                password: true;
+                                text <=> Store.approval-passphrase;
+                                accepted => {
+                                    if Store.health.totp { totp.focus-input(); } else { Store.approve(Store.approvals[Store.selected-approval].request-id); }
+                                }
+                            }
+                            totp := Field {
+                                visible: Store.health.totp;
+                                width: Store.health.totp ? 150px : 0px;
+                                placeholder: "Código TOTP";
+                                input-type: InputType.number;
+                                text <=> Store.approval-totp;
+                                accepted => { Store.approve(Store.approvals[Store.selected-approval].request-id); }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: end;
+                            Button {
+                                text: "Rejeitar";
+                                kind: "danger";
+                                icon: Icons.ban;
+                                enabled: !Store.busy;
+                                clicked => { Store.open-reject(); }
+                            }
+                            Button {
+                                text: "Aprovar e executar";
+                                kind: "primary";
+                                icon: Icons.check;
+                                shortcut: "Ctrl Enter";
+                                busy: Store.busy;
+                                enabled: Store.approval-passphrase != "";
+                                clicked => { Store.approve(Store.approvals[Store.selected-approval].request-id); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component EntryTableRow inherits Rectangle {
+    in property <bool> selected;
+    in property <string> id;
+    in property <string> kind;
+    in property <string> kind-label;
+    in property <string> label;
+    in property <string> targets;
+    in property <string> updated;
+    callback clicked;
+    callback double-clicked;
+    height: 44px;
+    border-radius: Theme.radius;
+    background: selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-2 : transparent;
+    animate background { duration: Theme.fast; }
+    accessible-role: list-item;
+    accessible-label: id;
+    accessible-item-selected: selected;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 16px;
+        Rectangle {
+            width: 3px;
+            height: 18px;
+            y: 13px;
+            border-radius: 2px;
+            background: root.selected ? Theme.accent : transparent;
+        }
+        Cell {
+            width: 30%;
+            text: root.id;
+            font-family: Theme.mono;
+            font-weight: 600;
+        }
+        HorizontalLayout {
+            width: 90px;
+            alignment: start;
+            Pill {
+                text: root.kind-label;
+                tone: root.kind == "password" ? "accent" : root.kind == "token" ? "warning" : root.kind == "cpf" ? "success" : "neutral";
+                y: 11px;
+            }
+        }
+        Cell {
+            horizontal-stretch: 1;
+            text: root.label;
+            color: Theme.text-2;
+        }
+        Cell {
+            width: 120px;
+            text: root.updated;
+            color: Theme.text-3;
+            font-size: Theme.fs-sm;
+            horizontal-alignment: right;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+        double-clicked => { root.double-clicked(); }
+    }
+}
+
+export component EntriesPage inherits VerticalLayout {
+    PageHeader {
+        title: "Registros";
+        subtitle: "Segredos guardados no broker. Os agentes só enxergam o identificador.";
+        Field {
+            width: 260px;
+            y: (parent.height - self.height) / 2 - 10px;
+            placeholder: "Buscar registros";
+            leading-icon: Icons.search;
+            text <=> Store.entry-filter;
+            edited(text) => { Store.filter-entries(text); }
+        }
+        Button {
+            text: "Novo segredo";
+            kind: "primary";
+            icon: Icons.plus;
+            shortcut: "Ctrl N";
+            y: (parent.height - self.height) / 2 - 10px;
+            clicked => { Store.open-new-entry(); }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 16px;
+        vertical-stretch: 1;
+
+        Card {
+            horizontal-stretch: 1;
+            VerticalLayout {
+                padding: 8px;
+                HorizontalLayout {
+                    height: 36px;
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 16px;
+                    Rectangle { width: 3px; }
+                    ColumnHeader { width: 30%; text: "IDENTIFICADOR"; }
+                    ColumnHeader { width: 90px; text: "TIPO"; }
+                    ColumnHeader { text: "RÓTULO"; horizontal-stretch: 1; }
+                    ColumnHeader { width: 120px; text: "ATUALIZADO"; horizontal-alignment: right; }
+                }
+                Divider { }
+                if Store.entries.length == 0: EmptyState {
+                    vertical-stretch: 1;
+                    icon: Store.total-entries == 0 ? Icons.key : Icons.search;
+                    title: Store.total-entries == 0 ? "Nenhum segredo cadastrado" : "Nada encontrado";
+                    message: Store.total-entries == 0
+                        ? "Cadastre CPF, senhas e tokens. O valor vai direto para o broker e nunca volta para a tela."
+                        : "Nenhum registro corresponde à busca \"" + Store.entry-filter + "\".";
+                    if Store.total-entries == 0: HorizontalLayout {
+                        alignment: center;
+                        padding-top: 6px;
+                        Button {
+                            text: "Cadastrar primeiro segredo";
+                            kind: "primary";
+                            icon: Icons.plus;
+                            clicked => { Store.open-new-entry(); }
+                        }
+                    }
+                }
+                if Store.entries.length > 0: ListView {
+                    vertical-stretch: 1;
+                    for entry[i] in Store.entries: VerticalLayout {
+                        padding-top: 2px;
+                        EntryTableRow {
+                            selected: i == Store.selected-entry;
+                            id: entry.id;
+                            kind: entry.kind;
+                            kind-label: entry.kind-label;
+                            label: entry.label;
+                            updated: entry.updated;
+                            clicked => { Store.selected-entry = i; }
+                            double-clicked => {
+                                Store.selected-entry = i;
+                                Store.open-edit-entry();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Card {
+            width: 340px;
+            property <bool> valid: Store.selected-entry >= 0 && Store.selected-entry < Store.entries.length;
+            if !valid: EmptyState {
+                icon: Icons.info;
+                title: "Nenhum registro selecionado";
+                message: "Selecione um registro para ver os alvos autorizados e as operações que o usam.";
+            }
+            if valid: VerticalLayout {
+                padding: 20px;
+                spacing: 18px;
+                VerticalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: Store.entries[Store.selected-entry].id;
+                        color: Theme.text;
+                        font-size: Theme.fs-lg;
+                        font-weight: 650;
+                        font-family: Theme.mono;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: Store.entries[Store.selected-entry].label;
+                        color: Theme.text-3;
+                        font-size: Theme.fs;
+                        font-family: Theme.font;
+                        overflow: elide;
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        Pill {
+                            text: Store.entries[Store.selected-entry].kind-label;
+                            tone: "accent";
+                        }
+                        Pill {
+                            text: "revisão " + Store.entries[Store.selected-entry].revision;
+                        }
+                    }
+                }
+                Divider { }
+                VerticalLayout {
+                    spacing: 8px;
+                    SectionTitle {
+                        text: "ALVOS AUTORIZADOS";
+                    }
+                    if Store.entries[Store.selected-entry].targets.length == 0: Text {
+                        text: "Nenhum alvo: nenhuma operação poderá usar este segredo.";
+                        color: Theme.warning;
+                        font-size: Theme.fs-sm;
+                        font-family: Theme.font;
+                        wrap: word-wrap;
+                    }
+                    for target in Store.entries[Store.selected-entry].targets: HorizontalLayout {
+                        spacing: 8px;
+                        Icon {
+                            source: Icons.globe;
+                            tint: Theme.text-3;
+                            size: 13px;
+                            y: 2px;
+                        }
+                        Text {
+                            text: target;
+                            color: Theme.text;
+                            font-size: Theme.fs-sm;
+                            font-family: Theme.mono;
+                            overflow: elide;
+                        }
+                    }
+                }
+                VerticalLayout {
+                    spacing: 8px;
+                    SectionTitle {
+                        text: "OPERAÇÕES QUE USAM ESTE SEGREDO";
+                    }
+                    if Store.entries[Store.selected-entry].operations.length == 0: Text {
+                        text: "Nenhuma operação autorizada.";
+                        color: Theme.text-3;
+                        font-size: Theme.fs-sm;
+                        font-family: Theme.font;
+                    }
+                    for operation in Store.entries[Store.selected-entry].operations: HorizontalLayout {
+                        spacing: 8px;
+                        Icon {
+                            source: Icons.zap;
+                            tint: Theme.accent;
+                            size: 13px;
+                            y: 2px;
+                        }
+                        Text {
+                            text: operation;
+                            color: Theme.text;
+                            font-size: Theme.fs-sm;
+                            font-family: Theme.mono;
+                            overflow: elide;
+                        }
+                    }
+                }
+                GridLayout {
+                    spacing: 12px;
+                    Row {
+                        KeyValue {
+                            key: "CRIADO EM";
+                            value: Store.entries[Store.selected-entry].created;
+                        }
+                        KeyValue {
+                            key: "ATUALIZADO EM";
+                            value: Store.entries[Store.selected-entry].updated;
+                        }
+                    }
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: "Editar";
+                        icon: Icons.edit;
+                        horizontal-stretch: 1;
+                        clicked => { Store.open-edit-entry(); }
+                    }
+                    Button {
+                        text: "Remover";
+                        kind: "danger";
+                        icon: Icons.trash;
+                        shortcut: "Del";
+                        horizontal-stretch: 1;
+                        clicked => { Store.open-remove-entry(); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component OperationTableRow inherits Rectangle {
+    in property <bool> selected;
+    in property <string> id;
+    in property <string> entry;
+    in property <string> action;
+    in property <string> action-label;
+    in property <string> target;
+    callback clicked;
+    height: 48px;
+    border-radius: Theme.radius;
+    background: selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-2 : transparent;
+    animate background { duration: Theme.fast; }
+    accessible-role: list-item;
+    accessible-label: id;
+    accessible-item-selected: selected;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 14px;
+        Rectangle {
+            width: 3px;
+            height: 18px;
+            y: 15px;
+            border-radius: 2px;
+            background: root.selected ? Theme.accent : transparent;
+        }
+        ActionIcon {
+            action: root.action;
+            size: 28px;
+            y: 10px;
+        }
+        Cell {
+            width: 26%;
+            text: root.id;
+            font-family: Theme.mono;
+            font-weight: 600;
+        }
+        Cell {
+            width: 20%;
+            text: root.entry;
+            color: Theme.text-2;
+            font-family: Theme.mono;
+        }
+        Cell {
+            horizontal-stretch: 1;
+            text: root.target;
+            color: Theme.text-2;
+            font-size: Theme.fs-sm;
+            font-family: Theme.mono;
+        }
+        HorizontalLayout {
+            width: 96px;
+            alignment: end;
+            Pill {
+                text: root.action-label;
+                y: 13px;
+            }
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component OperationsPage inherits VerticalLayout {
+    PageHeader {
+        title: "Operações";
+        subtitle: "O que cada agente pode fazer com cada segredo, e para onde.";
+        Field {
+            width: 260px;
+            y: (parent.height - self.height) / 2 - 10px;
+            placeholder: "Buscar operações";
+            leading-icon: Icons.search;
+            text <=> Store.operation-filter;
+            edited(text) => { Store.filter-operations(text); }
+        }
+        Button {
+            text: "Autorizar operação";
+            kind: "primary";
+            icon: Icons.plus;
+            shortcut: "Ctrl N";
+            y: (parent.height - self.height) / 2 - 10px;
+            clicked => { Store.open-authorize(); }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 16px;
+        vertical-stretch: 1;
+
+        Card {
+            horizontal-stretch: 1;
+            VerticalLayout {
+                padding: 8px;
+                HorizontalLayout {
+                    height: 36px;
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 14px;
+                    Rectangle { width: 3px; }
+                    Rectangle { width: 28px; }
+                    ColumnHeader { width: 26%; text: "OPERAÇÃO"; }
+                    ColumnHeader { width: 20%; text: "REGISTRO"; }
+                    ColumnHeader { text: "ALVO"; horizontal-stretch: 1; }
+                    ColumnHeader { width: 96px; text: "AÇÃO"; horizontal-alignment: right; }
+                }
+                Divider { }
+                if Store.operations.length == 0: EmptyState {
+                    vertical-stretch: 1;
+                    icon: Store.total-operations == 0 ? Icons.zap : Icons.search;
+                    title: Store.total-operations == 0 ? "Nenhuma operação autorizada" : "Nada encontrado";
+                    message: Store.total-operations == 0
+                        ? "Uma operação define o que o agente pode fazer com um segredo: qual ação, em qual alvo e com quais parâmetros."
+                        : "Nenhuma operação corresponde à busca \"" + Store.operation-filter + "\".";
+                    if Store.total-operations == 0 && Store.total-entries > 0: HorizontalLayout {
+                        alignment: center;
+                        padding-top: 6px;
+                        Button {
+                            text: "Autorizar primeira operação";
+                            kind: "primary";
+                            icon: Icons.plus;
+                            clicked => { Store.open-authorize(); }
+                        }
+                    }
+                }
+                if Store.operations.length > 0: ListView {
+                    vertical-stretch: 1;
+                    for operation[i] in Store.operations: VerticalLayout {
+                        padding-top: 2px;
+                        OperationTableRow {
+                            selected: i == Store.selected-operation;
+                            id: operation.id;
+                            entry: operation.entry;
+                            action: operation.action;
+                            action-label: operation.action-label;
+                            target: operation.target;
+                            clicked => { Store.selected-operation = i; }
+                        }
+                    }
+                }
+            }
+        }
+
+        Card {
+            width: 340px;
+            property <bool> valid: Store.selected-operation >= 0 && Store.selected-operation < Store.operations.length;
+            if !valid: EmptyState {
+                icon: Icons.info;
+                title: "Nenhuma operação selecionada";
+                message: "Selecione uma operação para ver o alvo, os parâmetros e revogar o acesso.";
+            }
+            if valid: VerticalLayout {
+                padding: 20px;
+                spacing: 18px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    ActionIcon {
+                        action: Store.operations[Store.selected-operation].action;
+                        size: 40px;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 3px;
+                        Text {
+                            text: Store.operations[Store.selected-operation].id;
+                            color: Theme.text;
+                            font-size: Theme.fs-lg;
+                            font-weight: 650;
+                            font-family: Theme.mono;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: Store.operations[Store.selected-operation].action;
+                            color: Theme.text-3;
+                            font-size: Theme.fs-sm;
+                            font-family: Theme.mono;
+                        }
+                    }
+                }
+                Text {
+                    text: Store.operations[Store.selected-operation].description == "" ? "Sem descrição." : Store.operations[Store.selected-operation].description;
+                    color: Theme.text-2;
+                    font-size: Theme.fs;
+                    font-family: Theme.font;
+                    wrap: word-wrap;
+                }
+                Divider { }
+                KeyValue {
+                    key: "ALVO";
+                    value: Store.operations[Store.selected-operation].target;
+                    mono: true;
+                }
+                KeyValue {
+                    key: "REGISTRO";
+                    value: Store.operations[Store.selected-operation].entry;
+                    mono: true;
+                }
+                KeyValue {
+                    key: "PARÂMETROS DO AGENTE";
+                    value: Store.operations[Store.selected-operation].params;
+                    mono: true;
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    Pill {
+                        text: Store.operations[Store.selected-operation].requires-approval ? "Exige aprovação a cada uso" : "Executa sem aprovação";
+                        tone: Store.operations[Store.selected-operation].requires-approval ? "success" : "warning";
+                        icon: Icons.shield;
+                    }
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+                Button {
+                    text: "Revogar operação";
+                    kind: "danger";
+                    icon: Icons.ban;
+                    shortcut: "Del";
+                    clicked => { Store.open-revoke(); }
+                }
+            }
+        }
+    }
+}
+
+export component OfflinePage inherits Card {
+    EmptyState {
+        icon: Icons.alert;
+        title: "Broker indisponível";
+        message: Store.health.message + "\nVerifique o serviço SVaultBroker (services.msc) e tente novamente.";
+        HorizontalLayout {
+            alignment: center;
+            padding-top: 6px;
+            Button {
+                text: "Tentar novamente";
+                kind: "primary";
+                icon: Icons.refresh;
+                busy: Store.busy;
+                clicked => { Store.refresh(); }
+            }
+        }
+    }
+}
+
+export component SetupPage inherits Rectangle {
+    private property <string> passphrase;
+    private property <string> confirmation;
+    private property <bool> totp: true;
+    private property <int> strength: passphrase.character-count >= 16 ? 3 : passphrase.character-count >= 12 ? 2 : passphrase.character-count >= 8 ? 1 : 0;
+
+    Card {
+        width: 520px;
+        height: layout.preferred-height;
+        layout := VerticalLayout {
+            padding: 32px;
+            spacing: 18px;
+
+            if Store.totp-uri == "": VerticalLayout {
+                spacing: 18px;
+                HorizontalLayout {
+                    alignment: start;
+                    Image {
+                        source: Icons.app;
+                        width: 44px;
+                        height: 44px;
+                    }
+                }
+                VerticalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: "Crie o seu cofre";
+                        color: Theme.text;
+                        font-size: Theme.fs-2xl;
+                        font-weight: 650;
+                        font-family: Theme.font;
+                    }
+                    Text {
+                        text: "A senha do cofre protege todos os segredos e é pedida a cada aprovação. Use uma senha diferente da do Windows: ela não pode ser recuperada.";
+                        color: Theme.text-2;
+                        font-size: Theme.fs;
+                        font-family: Theme.font;
+                        wrap: word-wrap;
+                    }
+                }
+                VerticalLayout {
+                    spacing: 6px;
+                    FieldLabel { text: "Senha do cofre"; }
+                    first := Field {
+                        password: true;
+                        placeholder: "Mínimo de 12 caracteres";
+                        text <=> root.passphrase;
+                        accepted => { second.focus-input(); }
+                    }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        padding-top: 2px;
+                        for level in 3: Rectangle {
+                            height: 4px;
+                            border-radius: 2px;
+                            background: root.strength > level ? (root.strength == 1 ? Theme.danger : root.strength == 2 ? Theme.warning : Theme.success) : Theme.surface-3;
+                            animate background { duration: Theme.normal; }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    spacing: 6px;
+                    FieldLabel { text: "Confirmar senha"; }
+                    second := Field {
+                        password: true;
+                        placeholder: "Repita a senha";
+                        text <=> root.confirmation;
+                        invalid: root.confirmation != "" && root.confirmation != root.passphrase;
+                        accepted => { Store.init-vault(root.passphrase, root.confirmation, root.totp); }
+                    }
+                }
+                Toggle {
+                    text: "Proteger aprovações com TOTP";
+                    hint: "Recomendado. Exige o código do seu aplicativo autenticador além da senha.";
+                    checked <=> root.totp;
+                }
+                if Store.form-error != "": Text {
+                    text: Store.form-error;
+                    color: Theme.danger;
+                    font-size: Theme.fs-sm;
+                    font-family: Theme.font;
+                    wrap: word-wrap;
+                }
+                Button {
+                    text: "Criar cofre";
+                    kind: "primary";
+                    icon: Icons.lock;
+                    busy: Store.busy;
+                    enabled: root.passphrase != "" && root.confirmation == root.passphrase;
+                    clicked => { Store.init-vault(root.passphrase, root.confirmation, root.totp); }
+                }
+            }
+
+            if Store.totp-uri != "": VerticalLayout {
+                spacing: 18px;
+                VerticalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: "Configure o autenticador";
+                        color: Theme.text;
+                        font-size: Theme.fs-2xl;
+                        font-weight: 650;
+                        font-family: Theme.font;
+                    }
+                    Text {
+                        text: "Escaneie o código no Google Authenticator, Microsoft Authenticator ou similar. Ele só é mostrado agora: depois de concluir, não será exibido de novo.";
+                        color: Theme.text-2;
+                        font-size: Theme.fs;
+                        font-family: Theme.font;
+                        wrap: word-wrap;
+                    }
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 232px;
+                        height: 232px;
+                        border-radius: Theme.radius-lg;
+                        background: white;
+                        Image {
+                            width: 208px;
+                            height: 208px;
+                            source: Store.totp-qr;
+                            image-rendering: pixelated;
+                        }
+                    }
+                }
+                Button {
+                    text: "Já configurei, continuar";
+                    kind: "primary";
+                    icon: Icons.check;
+                    clicked => {
+                        root.passphrase = "";
+                        root.confirmation = "";
+                        Store.finish-setup();
+                    }
+                }
+            }
+        }
+    }
+}

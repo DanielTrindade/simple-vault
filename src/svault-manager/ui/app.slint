@@ -1,0 +1,413 @@
+import { Theme, Icons } from "theme.slint";
+import { Store } from "store.slint";
+import { Icon, Kbd, Dot, Divider, SectionTitle, Spinner } from "controls.slint";
+import { ApprovalsPage, EntriesPage, OperationsPage, OfflinePage, SetupPage } from "pages.slint";
+import { EntryDialog, ConfirmDialog, AuthorizeDialog, ResultDialog, ShortcutsDialog, CommandPalette, ToastStack } from "overlays.slint";
+
+export { Store }
+export { EntryRow, OperationRow, ParamRow, ApprovalRow, HealthData, ToastData, CommandItem, ResultData, EntryForm, AuthorizeForm, ConfirmData } from "types.slint";
+
+component NavItem inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> active;
+    in property <int> badge;
+    in property <string> shortcut;
+    callback clicked;
+    height: 36px;
+    border-radius: Theme.radius;
+    background: active ? Theme.surface-3 : touch.has-hover ? Theme.surface-2 : transparent;
+    animate background { duration: Theme.fast; }
+    accessible-role: tab;
+    accessible-label: text;
+    accessible-item-selected: active;
+    accessible-action-default => { clicked(); }
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 8px;
+        spacing: 10px;
+        Icon {
+            source: root.icon;
+            tint: root.active ? Theme.accent : Theme.text-2;
+            size: 16px;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.text;
+            color: root.active ? Theme.text : Theme.text-2;
+            font-size: Theme.fs;
+            font-weight: root.active ? 600 : 500;
+            font-family: Theme.font;
+            vertical-alignment: center;
+        }
+        if root.badge > 0: Rectangle {
+            width: Math.max(20px, badge-text.preferred-width + 12px);
+            height: 20px;
+            y: 8px;
+            border-radius: 10px;
+            background: Theme.warning;
+            badge-text := Text {
+                text: root.badge;
+                color: #1b1305;
+                font-size: Theme.fs-xs;
+                font-weight: 700;
+            }
+        }
+        if root.badge == 0 && touch.has-hover: Text {
+            text: root.shortcut;
+            color: Theme.text-3;
+            font-size: Theme.fs-xs;
+            font-family: Theme.font;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component StatusLine inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    in property <color> tint: Theme.text-2;
+    spacing: 8px;
+    Text {
+        text: root.label;
+        color: Theme.text-3;
+        font-size: Theme.fs-sm;
+        font-family: Theme.font;
+    }
+    Text {
+        text: root.value;
+        color: root.tint;
+        font-size: Theme.fs-sm;
+        font-weight: 600;
+        font-family: Theme.font;
+        horizontal-alignment: right;
+    }
+}
+
+component Sidebar inherits Rectangle {
+    width: 236px;
+    background: Theme.sidebar;
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        background: Theme.border;
+    }
+    VerticalLayout {
+        padding: 14px;
+        padding-top: 18px;
+        spacing: 4px;
+
+        HorizontalLayout {
+            padding-left: 6px;
+            padding-bottom: 20px;
+            spacing: 10px;
+            Image {
+                source: Icons.app;
+                width: 30px;
+                height: 30px;
+            }
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: "SVault";
+                    color: Theme.text;
+                    font-size: Theme.fs-lg;
+                    font-weight: 700;
+                    font-family: Theme.font;
+                }
+                Text {
+                    text: "Cofre para agentes de IA";
+                    color: Theme.text-3;
+                    font-size: Theme.fs-xs;
+                    font-family: Theme.font;
+                }
+            }
+        }
+
+        Rectangle {
+            height: 34px;
+            border-radius: Theme.radius;
+            background: palette-touch.has-hover ? Theme.surface-2 : Theme.input;
+            border-width: 1px;
+            border-color: Theme.border;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 6px;
+                spacing: 8px;
+                Icon {
+                    source: Icons.search;
+                    tint: Theme.text-3;
+                    size: 14px;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: "Buscar comandos";
+                    color: Theme.text-3;
+                    font-size: Theme.fs-sm;
+                    font-family: Theme.font;
+                    vertical-alignment: center;
+                }
+                Kbd {
+                    text: "Ctrl K";
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+            palette-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { Store.open-palette(); }
+            }
+        }
+
+        Rectangle { height: 14px; }
+
+        SectionTitle {
+            text: "COFRE";
+            x: 10px;
+        }
+        Rectangle { height: 6px; }
+
+        NavItem {
+            text: "Aprovações";
+            icon: Icons.inbox;
+            active: Store.page == 0;
+            badge: Store.approvals.length;
+            shortcut: "Ctrl 1";
+            clicked => { Store.page = 0; }
+        }
+        NavItem {
+            text: "Registros";
+            icon: Icons.key;
+            active: Store.page == 1;
+            shortcut: "Ctrl 2";
+            clicked => { Store.page = 1; }
+        }
+        NavItem {
+            text: "Operações";
+            icon: Icons.zap;
+            active: Store.page == 2;
+            shortcut: "Ctrl 3";
+            clicked => { Store.page = 2; }
+        }
+
+        Rectangle { vertical-stretch: 1; }
+
+        Rectangle {
+            vertical-stretch: 0;
+            border-radius: Theme.radius-lg;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.border;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Dot {
+                        tint: !Store.loaded ? Theme.text-3 : Store.health.online ? Theme.success : Theme.danger;
+                        pulse: Store.health.online;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        text: !Store.loaded ? "Conectando…" : Store.health.online ? "Broker ativo" : "Broker offline";
+                        color: Theme.text;
+                        font-size: Theme.fs-sm;
+                        font-weight: 600;
+                        font-family: Theme.font;
+                    }
+                    if Store.busy: Spinner {
+                        size: 12px;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+                if Store.health.online: Divider { }
+                if Store.health.online: StatusLine {
+                    label: "Cofre";
+                    value: Store.health.initialized ? "inicializado" : "não inicializado";
+                    tint: Store.health.initialized ? Theme.text-2 : Theme.warning;
+                }
+                if Store.health.online: StatusLine {
+                    label: "TOTP";
+                    value: Store.health.totp ? "ativo" : "inativo";
+                    tint: Store.health.totp ? Theme.success : Theme.text-2;
+                }
+                if Store.health.online: StatusLine {
+                    label: "Registros · Operações";
+                    value: Store.health.entries + " · " + Store.health.operations;
+                }
+                if Store.health.online: Text {
+                    text: Store.health.identity + "  ·  v" + Store.health.version;
+                    color: Theme.text-3;
+                    font-size: Theme.fs-xs;
+                    font-family: Theme.font;
+                    overflow: elide;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            padding-top: 8px;
+            padding-left: 4px;
+            spacing: 6px;
+            Text {
+                horizontal-stretch: 1;
+                text: "Atalhos";
+                color: shortcuts-touch.has-hover ? Theme.text-2 : Theme.text-3;
+                font-size: Theme.fs-xs;
+                font-family: Theme.font;
+                vertical-alignment: center;
+                shortcuts-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { Store.run-command("shortcuts"); }
+                }
+            }
+            Kbd {
+                text: "?";
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "SVault Manager";
+    icon: Icons.app;
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    min-width: 1040px;
+    min-height: 660px;
+    background: Theme.bg;
+    default-font-family: Theme.font;
+    default-font-size: Theme.fs;
+
+    private property <bool> ready: Store.health.online && Store.health.initialized;
+    private property <string> modal: Store.modal;
+
+    changed modal => {
+        if modal == "" { keys.focus(); }
+    }
+
+    keys := FocusScope {
+        capture-key-pressed(event) => {
+            if event.modifiers.control && (event.text == "k" || event.text == "K") {
+                Store.open-palette();
+                return accept;
+            }
+            if event.text == Key.Escape && Store.modal != "" {
+                Store.close-modal();
+                keys.focus();
+                return accept;
+            }
+            if event.text == Key.F5 {
+                Store.refresh();
+                return accept;
+            }
+            if Store.modal != "" || !root.ready {
+                return reject;
+            }
+            if event.modifiers.control && event.text == "1" {
+                Store.page = 0;
+                return accept;
+            }
+            if event.modifiers.control && event.text == "2" {
+                Store.page = 1;
+                return accept;
+            }
+            if event.modifiers.control && event.text == "3" {
+                Store.page = 2;
+                return accept;
+            }
+            if event.modifiers.control && (event.text == "n" || event.text == "N") {
+                Store.create-in-page();
+                return accept;
+            }
+            if event.modifiers.control && event.text == Key.Return && Store.page == 0 && Store.approvals.length > 0 {
+                if Store.approval-passphrase != "" && !Store.busy {
+                    Store.approve(Store.approvals[Store.selected-approval].request-id);
+                }
+                return accept;
+            }
+            reject
+        }
+
+        key-pressed(event) => {
+            if Store.modal != "" || !root.ready {
+                return reject;
+            }
+            if event.text == Key.UpArrow {
+                Store.move-selection(-1);
+                return accept;
+            }
+            if event.text == Key.DownArrow {
+                Store.move-selection(1);
+                return accept;
+            }
+            if event.text == Key.Delete {
+                Store.delete-selected();
+                return accept;
+            }
+            if event.text == Key.Return && Store.page == 1 {
+                Store.open-edit-entry();
+                return accept;
+            }
+            if event.text == "?" {
+                Store.run-command("shortcuts");
+                return accept;
+            }
+            reject
+        }
+
+        HorizontalLayout {
+            Sidebar { }
+
+            Rectangle {
+                horizontal-stretch: 1;
+                VerticalLayout {
+                    padding: 28px;
+                    padding-top: 24px;
+
+                    if !Store.loaded: Rectangle {
+                        vertical-stretch: 1;
+                        Spinner {
+                            size: 22px;
+                        }
+                    }
+                    if Store.loaded && !Store.health.online: OfflinePage {
+                        vertical-stretch: 1;
+                    }
+                    if Store.loaded && Store.health.online && (!Store.health.initialized || Store.totp-uri != ""): SetupPage {
+                        vertical-stretch: 1;
+                    }
+                    if root.ready && Store.totp-uri == "" && Store.page == 0: ApprovalsPage {
+                        vertical-stretch: 1;
+                    }
+                    if root.ready && Store.totp-uri == "" && Store.page == 1: EntriesPage {
+                        vertical-stretch: 1;
+                    }
+                    if root.ready && Store.totp-uri == "" && Store.page == 2: OperationsPage {
+                        vertical-stretch: 1;
+                    }
+                }
+            }
+        }
+
+        if Store.modal == "entry": EntryDialog { }
+        if Store.modal == "confirm": ConfirmDialog { }
+        if Store.modal == "authorize": AuthorizeDialog { }
+        if Store.modal == "result": ResultDialog { }
+        if Store.modal == "shortcuts": ShortcutsDialog { }
+        if Store.modal == "palette": CommandPalette { }
+
+        ToastStack {
+            x: parent.width - self.width - 24px;
+            y: parent.height - self.preferred-height - 24px;
+            width: 360px;
+            height: self.preferred-height;
+        }
+    }
+
+    init => { keys.focus(); }
+}

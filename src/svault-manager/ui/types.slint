@@ -1,0 +1,118 @@
+export struct EntryRow {
+    id: string,
+    label: string,
+    kind: string,
+    kind-label: string,
+    targets: [string],
+    targets-text: string,
+    created: string,
+    updated: string,
+    revision: int,
+    operations: [string],
+}
+
+export struct OperationRow {
+    id: string,
+    entry: string,
+    action: string,
+    action-label: string,
+    target: string,
+    description: string,
+    params: string,
+    requires-approval: bool,
+}
+
+export struct ParamRow {
+    name: string,
+    value: string,
+}
+
+export struct ApprovalRow {
+    request-id: string,
+    operation: string,
+    entry: string,
+    target: string,
+    action: string,
+    action-label: string,
+    method: string,
+    description: string,
+    auxiliary: string,
+    params: [ParamRow],
+    created: string,
+    remaining: string,
+    progress: float,
+    urgent: bool,
+}
+
+export struct HealthData {
+    online: bool,
+    initialized: bool,
+    totp: bool,
+    identity: string,
+    version: string,
+    entries: int,
+    operations: int,
+    message: string,
+}
+
+export struct ToastData {
+    id: int,
+    kind: string,
+    title: string,
+    message: string,
+}
+
+export struct CommandItem {
+    id: string,
+    title: string,
+    group: string,
+    shortcut: string,
+}
+
+export struct ResultData {
+    request-id: string,
+    operation: string,
+    ok: bool,
+    status: string,
+    kind: string,
+    code: string,
+    duration: string,
+    output: string,
+    error: string,
+}
+
+export struct EntryForm {
+    editing: bool,
+    id: string,
+    kind: int,
+    label: string,
+    targets: string,
+    value: string,
+    passphrase: string,
+}
+
+export struct AuthorizeForm {
+    id: string,
+    entry: int,
+    description: string,
+    params: string,
+    action: int,
+    target: string,
+    method: int,
+    content-type: string,
+    body: string,
+    headers: string,
+    result-fields: string,
+    args: string,
+    env: string,
+    timeout: string,
+    passphrase: string,
+}
+
+export struct ConfirmData {
+    action: string,
+    subject: string,
+    title: string,
+    message: string,
+    confirm-label: string,
+}

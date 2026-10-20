@@ -90,7 +90,7 @@ O gerenciador gráfico pede a senha do cofre a cada ação e aprova as solicita�
 | `src/SVault.Broker` | Windows Service + named pipe + despacho de comandos + fluxo de aprovação |
 | `src/SVault.Client` | cliente do pipe (usado pela CLI e pela GUI) |
 | `src/SVault.Cli` | `svaultctl` — administration e automação |
-| `src/SVault.Manager` | `SVaultManager.exe` — interface gráfica |
+| `src/svault-manager` | `SVaultManager.exe` — interface gráfica em Rust/Slint (fase 1 da migração) |
 | `src/svault-mcp` | servidor MCP (stdio) para os agentes |
 | `install/` | instalador e desinstalador elevados |
 | `tests/` | testes de fumaça com dados fictícios |
@@ -102,6 +102,41 @@ Instalação final:
 - `C:\SVault\SVaultManager.exe` — interface gráfica
 - `C:\SVault\mcp\index.mjs` — servidor MCP
 - `C:\ProgramData\SVault\` — estado, log e configuração (ACL restrita)
+
+### Gerenciador em Rust (`src/svault-manager`)
+
+Primeira fase da migração para Rust: só a interface foi reescrita. Ela fala o mesmo protocolo
+do pipe (`4 bytes LE + JSON`) com o broker atual, então o cofre, o MCP e a CLI não mudam.
+
+- Barra lateral com Aprovações, Registros e Operações; lista com painel de detalhes.
+- Aprovação com senha e TOTP no próprio painel, contagem regressiva e resultado sanitizado.
+- Assistente em etapas para autorizar operações (HTTP, processo via stdin, eco de teste).
+- Primeiro uso pela interface, com QR code do TOTP.
+- Paleta de comandos (`Ctrl+K`), atalhos (`Ctrl+1/2/3`, `Ctrl+N`, `Ctrl+Enter`, `Del`, `F5`, `?`).
+- Senhas copiadas para `Zeroizing<String>` e a requisição montada em buffer pré-alocado e
+  zerado após o envio.
+
+O instalador compila o gerenciador com `cargo` e o instala como `C:\SVault\SVaultManager.exe`.
+Sem MSVC, passe `-CargoToolchain stable-x86_64-pc-windows-gnu` ao `Install-SVault.ps1`.
+
+Compilação manual (com Build Tools do Visual Studio e o workload C++):
+
+```powershell
+cd src\svault-manager
+cargo build --release
+cargo test
+```
+
+Sem MSVC, use o toolchain GNU (`rustup toolchain install stable-x86_64-pc-windows-gnu`) com um
+MinGW de 64 bits no `PATH` e rode `cargo +stable-x86_64-pc-windows-gnu build --release`.
+
+`SVAULT_PIPE` aponta o gerenciador para outro pipe, como no servidor MCP. Para testar com dados
+fictícios, suba um broker isolado e abra o gerenciador apontando para ele:
+
+```powershell
+svault-broker.exe --console --home $env:TEMP\svault-demo --pipe svault.demo --in-memory-credentials
+$env:SVAULT_PIPE = "svault.demo"; .\target\release\svault-manager.exe
+```
 
 ---
 
