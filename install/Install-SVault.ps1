@@ -22,6 +22,7 @@ param(
     [string]$InstallRoot = 'C:\SVault',
     [string]$DataRoot = 'C:\ProgramData\SVault',
     [string]$SourceRoot = (Join-Path $PSScriptRoot '..\src'),
+    [string]$CargoToolchain = '',
     [switch]$SkipBuild
 )
 
@@ -48,6 +49,27 @@ function Publish-Project {
     Write-Host "Publicando $Project ..."
     & dotnet publish $Project -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o $Output --nologo -v q
     if ($LASTEXITCODE -ne 0) { throw "Falha ao publicar $Project" }
+}
+
+function Publish-RustManager {
+    param([string]$Crate, [string]$Output)
+
+    if ($SkipBuild) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Output 'SVaultManager.exe'))) { throw "Saida nao encontrada com -SkipBuild: $Output" }
+        return
+    }
+
+    $cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
+    if (-not $cargo) { throw 'Rust (cargo) e necessario para compilar o gerenciador.' }
+
+    Write-Host "Compilando $Crate ..."
+    $cargoArgs = @('build', '--release', '--locked', '--manifest-path', (Join-Path $Crate 'Cargo.toml'))
+    if ($CargoToolchain) { $cargoArgs = @("+$CargoToolchain") + $cargoArgs }
+    & $cargo @cargoArgs
+    if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar $Crate" }
+
+    New-Item -ItemType Directory -Path $Output -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $Crate 'target\release\svault-manager.exe') -Destination (Join-Path $Output 'SVaultManager.exe') -Force -ErrorAction Stop
 }
 
 function Copy-Tree {
@@ -115,7 +137,7 @@ if (-not $SkipBuild -and (Test-Path -LiteralPath $publishRoot)) { Remove-Item -L
 
 Publish-Project -Project (Join-Path $SourceRoot 'SVault.Broker\SVault.Broker.csproj') -Output (Join-Path $publishRoot 'broker')
 Publish-Project -Project (Join-Path $SourceRoot 'SVault.Cli\SVault.Cli.csproj') -Output (Join-Path $publishRoot 'cli')
-Publish-Project -Project (Join-Path $SourceRoot 'SVault.Manager\SVault.Manager.csproj') -Output (Join-Path $publishRoot 'manager')
+Publish-RustManager -Crate (Join-Path $SourceRoot 'svault-manager') -Output (Join-Path $publishRoot 'manager')
 
 # 2. Prepara e valida uma release completa antes de alterar o servico
 $installParent = Split-Path -Parent ([IO.Path]::GetFullPath($InstallRoot))

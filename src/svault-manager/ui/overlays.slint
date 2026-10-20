@@ -1,0 +1,882 @@
+import { ScrollView } from "std-widgets.slint";
+import { Theme, Icons } from "theme.slint";
+import { Store } from "store.slint";
+import { ToastData } from "types.slint";
+import { Icon, IconButton, Button, Field, FieldLabel, Pill, Kbd, KeyValue, Segmented, SelectList, Divider, SectionTitle } from "controls.slint";
+
+component Sheet inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <image> icon;
+    in property <string> tone: "accent";
+    in property <length> sheet-width: 480px;
+    callback close;
+    background: Theme.overlay;
+
+    TouchArea {
+        clicked => { root.close(); }
+    }
+
+    Rectangle {
+        width: root.sheet-width;
+        height: Math.min(body.preferred-height, root.height - 64px);
+        border-radius: 14px;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        drop-shadow-blur: 40px;
+        drop-shadow-offset-y: 16px;
+        drop-shadow-color: #00000090;
+        clip: true;
+
+        TouchArea { }
+
+        body := VerticalLayout {
+            padding: 24px;
+            spacing: 18px;
+            HorizontalLayout {
+                spacing: 12px;
+                if root.icon.width > 0: Rectangle {
+                    width: 36px;
+                    height: 36px;
+                    border-radius: 10px;
+                    background: root.tone == "danger" ? Theme.danger-soft : root.tone == "success" ? Theme.success-soft : Theme.accent-soft;
+                    Icon {
+                        source: root.icon;
+                        tint: root.tone == "danger" ? Theme.danger : root.tone == "success" ? Theme.success : Theme.accent;
+                        size: 17px;
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 2px;
+                    Text {
+                        text: root.title;
+                        color: Theme.text;
+                        font-size: Theme.fs-lg;
+                        font-weight: 650;
+                        font-family: Theme.font;
+                    }
+                    if root.subtitle != "": Text {
+                        text: root.subtitle;
+                        color: Theme.text-3;
+                        font-size: Theme.fs-sm;
+                        font-family: Theme.font;
+                        overflow: elide;
+                    }
+                }
+                IconButton {
+                    icon: Icons.x;
+                    tooltip: "Fechar";
+                    y: 3px;
+                    clicked => { root.close(); }
+                }
+            }
+            @children
+        }
+    }
+}
+
+component FormError inherits Rectangle {
+    in property <string> text;
+    visible: text != "";
+    height: text == "" ? 0px : row.preferred-height;
+    border-radius: Theme.radius;
+    background: Theme.danger-soft;
+    row := HorizontalLayout {
+        padding: 10px;
+        spacing: 8px;
+        Icon {
+            source: Icons.alert;
+            tint: Theme.danger;
+            size: 14px;
+        }
+        Text {
+            text: root.text;
+            color: Theme.danger;
+            font-size: Theme.fs-sm;
+            font-family: Theme.font;
+            wrap: word-wrap;
+        }
+    }
+}
+
+component Hint inherits Text {
+    color: Theme.text-3;
+    font-size: Theme.fs-sm;
+    font-family: Theme.font;
+    wrap: word-wrap;
+}
+
+export component EntryDialog inherits Sheet {
+    title: Store.entry-form.editing ? "Editar " + Store.entry-form.id : "Novo segredo";
+    subtitle: Store.entry-form.editing ? "Deixe o valor vazio para manter o atual." : "O valor vai direto ao broker: sem eco, sem área de transferência.";
+    icon: Icons.key;
+    sheet-width: 520px;
+    close => { Store.close-modal(); }
+
+    init => {
+        if Store.entry-form.editing { label-field.focus-input(); } else { id-field.focus-input(); }
+    }
+
+    VerticalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Tipo"; }
+        Segmented {
+            options: ["CPF", "Senha", "Token", "Genérico"];
+            current: Store.entry-form.kind;
+            enabled: !Store.entry-form.editing;
+            changed(i) => { Store.entry-form.kind = i; }
+        }
+    }
+    VerticalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Identificador"; hint: "visível para os agentes"; }
+        id-field := Field {
+            placeholder: "SENHA_PORTAL_RH";
+            mono: true;
+            enabled: !Store.entry-form.editing;
+            text: Store.entry-form.id;
+            edited(t) => { Store.entry-form.id = t; }
+            accepted => { label-field.focus-input(); }
+        }
+    }
+    VerticalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Rótulo"; hint: "opcional"; }
+        label-field := Field {
+            placeholder: "Descrição curta para você";
+            text: Store.entry-form.label;
+            edited(t) => { Store.entry-form.label = t; }
+        }
+    }
+    VerticalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Alvos autorizados"; hint: "um por linha"; }
+        Field {
+            multiline: true;
+            mono: true;
+            placeholder: "https://portal.exemplo.com.br\nC:\\Ferramentas\\cliente.exe";
+            text: Store.entry-form.targets;
+            edited(t) => { Store.entry-form.targets = t; }
+        }
+    }
+    VerticalLayout {
+        spacing: 6px;
+        FieldLabel { text: Store.entry-form.editing ? "Novo valor" : "Valor do segredo"; }
+        Field {
+            password: true;
+            placeholder: Store.entry-form.editing ? "Manter o valor atual" : "Valor que o broker vai guardar";
+            text: Store.entry-form.value;
+            edited(t) => { Store.entry-form.value = t; }
+        }
+    }
+    Divider { }
+    VerticalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Senha do cofre"; }
+        Field {
+            password: true;
+            leading-icon: Icons.lock;
+            placeholder: "Confirme para gravar";
+            text: Store.entry-form.passphrase;
+            edited(t) => { Store.entry-form.passphrase = t; }
+            accepted => { Store.save-entry(Store.entry-form); }
+        }
+    }
+    FormError { text: Store.form-error; }
+    HorizontalLayout {
+        spacing: 10px;
+        alignment: end;
+        Button {
+            text: "Cancelar";
+            kind: "ghost";
+            clicked => { Store.close-modal(); }
+        }
+        Button {
+            text: Store.entry-form.editing ? "Salvar alterações" : "Cadastrar segredo";
+            kind: "primary";
+            busy: Store.busy;
+            enabled: Store.entry-form.passphrase != "" && Store.entry-form.id != "" && (Store.entry-form.editing || Store.entry-form.value != "");
+            clicked => { Store.save-entry(Store.entry-form); }
+        }
+    }
+}
+
+export component ConfirmDialog inherits Sheet {
+    title: Store.confirm.title;
+    subtitle: Store.confirm.subject;
+    icon: Icons.alert;
+    tone: "danger";
+    close => { Store.close-modal(); }
+    private property <string> passphrase;
+
+    init => { pass.focus-input(); }
+
+    Text {
+        text: Store.confirm.message;
+        color: Theme.text-2;
+        font-size: Theme.fs;
+        font-family: Theme.font;
+        wrap: word-wrap;
+    }
+    VerticalLayout {
+        spacing: 6px;
+        FieldLabel { text: "Senha do cofre"; }
+        pass := Field {
+            password: true;
+            leading-icon: Icons.lock;
+            placeholder: "Confirme para continuar";
+            text <=> root.passphrase;
+            accepted => {
+                if root.passphrase != "" { Store.confirm-submit(root.passphrase); }
+            }
+        }
+    }
+    FormError { text: Store.form-error; }
+    HorizontalLayout {
+        spacing: 10px;
+        alignment: end;
+        Button {
+            text: "Cancelar";
+            kind: "ghost";
+            clicked => { Store.close-modal(); }
+        }
+        Button {
+            text: Store.confirm.confirm-label;
+            kind: "danger-solid";
+            busy: Store.busy;
+            enabled: root.passphrase != "";
+            clicked => { Store.confirm-submit(root.passphrase); }
+        }
+    }
+}
+
+component Stepper inherits HorizontalLayout {
+    in property <[string]> steps;
+    in property <int> current;
+    spacing: 8px;
+    for step[i] in root.steps: HorizontalLayout {
+        spacing: 8px;
+        Rectangle {
+            width: 22px;
+            height: 22px;
+            border-radius: 11px;
+            background: i < root.current ? Theme.accent : i == root.current ? Theme.accent-soft : Theme.surface-3;
+            border-width: i == root.current ? 1px : 0px;
+            border-color: Theme.accent;
+            if i < root.current: Icon {
+                source: Icons.check;
+                tint: Theme.accent-fg;
+                size: 12px;
+            }
+            if i >= root.current: Text {
+                text: i + 1;
+                color: i == root.current ? Theme.accent : Theme.text-3;
+                font-size: Theme.fs-xs;
+                font-weight: 700;
+            }
+        }
+        Text {
+            text: step;
+            color: i == root.current ? Theme.text : Theme.text-3;
+            font-size: Theme.fs-sm;
+            font-weight: i == root.current ? 600 : 500;
+            font-family: Theme.font;
+            vertical-alignment: center;
+        }
+        if i < root.steps.length - 1: Rectangle {
+            width: 24px;
+            height: 1px;
+            y: 11px;
+            background: Theme.border-strong;
+        }
+    }
+}
+
+export component AuthorizeDialog inherits Sheet {
+    title: "Autorizar operação";
+    subtitle: "Defina o que o agente pode fazer, com qual segredo e onde.";
+    icon: Icons.zap;
+    sheet-width: 600px;
+    close => { Store.close-modal(); }
+
+    private property <bool> is-http: Store.authorize-form.action == 0;
+    private property <bool> is-process: Store.authorize-form.action == 1;
+    private property <bool> step-valid: Store.authorize-step == 0
+        ? Store.authorize-form.id != "" && Store.entry-ids.length > 0
+        : Store.authorize-step == 1 ? Store.authorize-form.target != "" : Store.authorize-form.passphrase != "";
+
+    Stepper {
+        steps: ["Identificação", "Ação e alvo", "Revisão"];
+        current: Store.authorize-step;
+    }
+
+    if Store.authorize-step == 0: VerticalLayout {
+        spacing: 16px;
+        VerticalLayout {
+            spacing: 6px;
+            FieldLabel { text: "Identificador da operação"; hint: "o agente usa este nome"; }
+            op-id := Field {
+                init => { self.focus-input(); }
+                placeholder: "login_portal_rh";
+                mono: true;
+                text: Store.authorize-form.id;
+                edited(t) => { Store.authorize-form.id = t; }
+            }
+        }
+        VerticalLayout {
+            spacing: 6px;
+            FieldLabel { text: "Segredo utilizado"; }
+            SelectList {
+                items: Store.entry-ids;
+                details: Store.entry-labels;
+                current: Store.authorize-form.entry;
+                changed(i) => { Store.authorize-form.entry = i; }
+            }
+        }
+        VerticalLayout {
+            spacing: 6px;
+            FieldLabel { text: "Descrição"; hint: "opcional, aparece na aprovação"; }
+            Field {
+                placeholder: "Login no portal de RH para consultar holerites";
+                text: Store.authorize-form.description;
+                edited(t) => { Store.authorize-form.description = t; }
+            }
+        }
+        VerticalLayout {
+            spacing: 6px;
+            FieldLabel { text: "Parâmetros do agente"; hint: "separados por vírgula"; }
+            Field {
+                placeholder: "usuario, competencia";
+                mono: true;
+                text: Store.authorize-form.params;
+                edited(t) => { Store.authorize-form.params = t; }
+            }
+        }
+    }
+
+    if Store.authorize-step == 1: VerticalLayout {
+        spacing: 16px;
+        VerticalLayout {
+            spacing: 6px;
+            FieldLabel { text: "Ação"; }
+            Segmented {
+                options: ["Requisição HTTP", "Processo (stdin)", "Eco de teste"];
+                current: Store.authorize-form.action;
+                changed(i) => { Store.authorize-form.action = i; }
+            }
+        }
+        VerticalLayout {
+            spacing: 6px;
+            FieldLabel {
+                text: root.is-process ? "Executável" : "Alvo";
+                hint: "precisa estar entre os alvos autorizados do segredo";
+            }
+            Field {
+                placeholder: root.is-process ? "C:\\Ferramentas\\cliente.exe" : "https://portal.exemplo.com.br/login";
+                mono: true;
+                text: Store.authorize-form.target;
+                edited(t) => { Store.authorize-form.target = t; }
+            }
+        }
+        if root.is-http: VerticalLayout {
+            spacing: 16px;
+            HorizontalLayout {
+                spacing: 12px;
+                VerticalLayout {
+                    spacing: 6px;
+                    FieldLabel { text: "Método"; }
+                    Segmented {
+                        width: 270px;
+                        options: ["GET", "POST", "PUT", "PATCH", "DELETE"];
+                        current: Store.authorize-form.method;
+                        changed(i) => { Store.authorize-form.method = i; }
+                    }
+                }
+                VerticalLayout {
+                    spacing: 6px;
+                    FieldLabel { text: "Content-Type"; }
+                    Field {
+                        mono: true;
+                        text: Store.authorize-form.content-type;
+                        edited(t) => { Store.authorize-form.content-type = t; }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                VerticalLayout {
+                    spacing: 6px;
+                    FieldLabel { text: "Corpo"; hint: "campo=valor por linha"; }
+                    Field {
+                        multiline: true;
+                        mono: true;
+                        placeholder: "password={{secret}}\nuser={{param:usuario}}";
+                        text: Store.authorize-form.body;
+                        edited(t) => { Store.authorize-form.body = t; }
+                    }
+                }
+                VerticalLayout {
+                    spacing: 6px;
+                    FieldLabel { text: "Cabeçalhos"; hint: "nome=valor por linha"; }
+                    Field {
+                        multiline: true;
+                        mono: true;
+                        placeholder: "Authorization=Bearer {{secret}}";
+                        text: Store.authorize-form.headers;
+                        edited(t) => { Store.authorize-form.headers = t; }
+                    }
+                }
+            }
+            VerticalLayout {
+                spacing: 6px;
+                FieldLabel { text: "Campos devolvidos ao agente"; hint: "JSON, separados por vírgula"; }
+                Field {
+                    mono: true;
+                    placeholder: "status, nome";
+                    text: Store.authorize-form.result-fields;
+                    edited(t) => { Store.authorize-form.result-fields = t; }
+                }
+            }
+        }
+        if root.is-process: VerticalLayout {
+            spacing: 16px;
+            HorizontalLayout {
+                spacing: 12px;
+                VerticalLayout {
+                    spacing: 6px;
+                    FieldLabel { text: "Argumentos fixos"; hint: "um por linha"; }
+                    Field {
+                        multiline: true;
+                        mono: true;
+                        text: Store.authorize-form.args;
+                        edited(t) => { Store.authorize-form.args = t; }
+                    }
+                }
+                VerticalLayout {
+                    spacing: 6px;
+                    FieldLabel { text: "Variáveis"; hint: "NOME=VALOR"; }
+                    Field {
+                        multiline: true;
+                        mono: true;
+                        text: Store.authorize-form.env;
+                        edited(t) => { Store.authorize-form.env = t; }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                VerticalLayout {
+                    spacing: 6px;
+                    width: 140px;
+                    FieldLabel { text: "Tempo limite (s)"; }
+                    Field {
+                        input-type: InputType.number;
+                        text: Store.authorize-form.timeout;
+                        edited(t) => { Store.authorize-form.timeout = t; }
+                    }
+                }
+                Hint {
+                    text: "O segredo é entregue pela entrada padrão do processo, nunca por argumento ou variável de ambiente.";
+                    vertical-alignment: center;
+                }
+            }
+        }
+        if !root.is-http && !root.is-process: Hint {
+            text: "O eco de teste não envia o segredo a lugar nenhum: serve para validar o fluxo de aprovação com um agente.";
+        }
+    }
+
+    if Store.authorize-step == 2: VerticalLayout {
+        spacing: 16px;
+        Rectangle {
+            border-radius: Theme.radius;
+            background: Theme.input;
+            border-width: 1px;
+            border-color: Theme.border;
+            GridLayout {
+                padding: 16px;
+                spacing-horizontal: 24px;
+                spacing-vertical: 14px;
+                Row {
+                    KeyValue {
+                        key: "OPERAÇÃO";
+                        value: Store.authorize-form.id;
+                        mono: true;
+                    }
+                    KeyValue {
+                        key: "SEGREDO";
+                        value: Store.entry-ids.length > Store.authorize-form.entry ? Store.entry-ids[Store.authorize-form.entry] : "";
+                        mono: true;
+                    }
+                }
+                Row {
+                    KeyValue {
+                        key: "AÇÃO";
+                        value: root.is-http
+                            ? "HTTP " + (Store.authorize-form.method == 0 ? "GET" : Store.authorize-form.method == 1 ? "POST" : Store.authorize-form.method == 2 ? "PUT" : Store.authorize-form.method == 3 ? "PATCH" : "DELETE")
+                            : root.is-process ? "Processo (stdin)" : "Eco de teste";
+                    }
+                    KeyValue {
+                        key: "PARÂMETROS";
+                        value: Store.authorize-form.params;
+                        mono: true;
+                    }
+                }
+                Row {
+                    KeyValue {
+                        colspan: 2;
+                        key: "ALVO";
+                        value: Store.authorize-form.target;
+                        mono: true;
+                    }
+                }
+            }
+        }
+        VerticalLayout {
+            spacing: 6px;
+            FieldLabel { text: "Senha do cofre"; }
+            Field {
+                password: true;
+                leading-icon: Icons.lock;
+                init => { self.focus-input(); }
+                placeholder: "Confirme para autorizar";
+                text: Store.authorize-form.passphrase;
+                edited(t) => { Store.authorize-form.passphrase = t; }
+                accepted => {
+                    if Store.authorize-form.passphrase != "" { Store.authorize(Store.authorize-form); }
+                }
+            }
+        }
+    }
+
+    FormError { text: Store.form-error; }
+
+    HorizontalLayout {
+        spacing: 10px;
+        Button {
+            text: "Voltar";
+            kind: "ghost";
+            visible: Store.authorize-step > 0;
+            clicked => {
+                Store.form-error = "";
+                Store.authorize-step -= 1;
+            }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+        Button {
+            text: "Cancelar";
+            kind: "ghost";
+            clicked => { Store.close-modal(); }
+        }
+        Button {
+            text: Store.authorize-step < 2 ? "Continuar" : "Autorizar operação";
+            kind: "primary";
+            icon: Store.authorize-step < 2 ? Icons.chevron : Icons.check;
+            busy: Store.busy;
+            enabled: root.step-valid;
+            clicked => {
+                if Store.authorize-step < 2 {
+                    Store.form-error = "";
+                    Store.authorize-step += 1;
+                } else {
+                    Store.authorize(Store.authorize-form);
+                }
+            }
+        }
+    }
+}
+
+export component ResultDialog inherits Sheet {
+    title: Store.result.ok ? "Executado com sucesso" : "Execução com falha";
+    subtitle: Store.result.operation + " · " + Store.result.request-id;
+    icon: Store.result.ok ? Icons.check : Icons.alert;
+    tone: Store.result.ok ? "success" : "danger";
+    sheet-width: 680px;
+    close => { Store.close-modal(); }
+
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        Pill {
+            text: Store.result.status;
+            tone: Store.result.ok ? "success" : "danger";
+        }
+        if Store.result.kind != "": Pill { text: Store.result.kind; }
+        if Store.result.code != "": Pill { text: Store.result.code; }
+        if Store.result.duration != "": Pill {
+            text: Store.result.duration + " ms";
+            icon: Icons.clock;
+        }
+    }
+    if Store.result.error != "": FormError { text: Store.result.error; }
+    VerticalLayout {
+        spacing: 8px;
+        HorizontalLayout {
+            SectionTitle { text: "SAÍDA SANITIZADA"; }
+            Text {
+                text: "segredos aparecem como ***REDACTED***";
+                color: Theme.text-3;
+                font-size: Theme.fs-xs;
+                font-family: Theme.font;
+                horizontal-alignment: right;
+            }
+        }
+        Rectangle {
+            height: 300px;
+            border-radius: Theme.radius;
+            background: Theme.input;
+            border-width: 1px;
+            border-color: Theme.border;
+            ScrollView {
+                content-width: Math.max(self.visible-width, output.preferred-width + 24px);
+                content-height: output.preferred-height + 24px;
+                output := Text {
+                    x: 12px;
+                    y: 12px;
+                    text: Store.result.output == "" ? "(sem saída)" : Store.result.output;
+                    color: Store.result.output == "" ? Theme.text-3 : Theme.text;
+                    font-family: Theme.mono;
+                    font-size: Theme.fs-sm;
+                }
+            }
+        }
+    }
+    HorizontalLayout {
+        alignment: end;
+        Button {
+            text: "Fechar";
+            kind: "primary";
+            clicked => { Store.close-modal(); }
+        }
+    }
+}
+
+export component ShortcutsDialog inherits Sheet {
+    title: "Atalhos de teclado";
+    icon: Icons.command;
+    sheet-width: 460px;
+    close => { Store.close-modal(); }
+    for item in [
+        { keys: "Ctrl K", label: "Paleta de comandos" },
+        { keys: "Ctrl 1 · 2 · 3", label: "Aprovações · Registros · Operações" },
+        { keys: "Ctrl N", label: "Novo segredo ou nova operação" },
+        { keys: "Ctrl Enter", label: "Aprovar a solicitação selecionada" },
+        { keys: "↑ ↓", label: "Navegar na lista" },
+        { keys: "Del", label: "Remover, revogar ou rejeitar o item selecionado" },
+        { keys: "F5", label: "Atualizar" },
+        { keys: "Esc", label: "Fechar diálogo" },
+    ]: HorizontalLayout {
+        spacing: 12px;
+        Text {
+            horizontal-stretch: 1;
+            text: item.label;
+            color: Theme.text-2;
+            font-size: Theme.fs;
+            font-family: Theme.font;
+            vertical-alignment: center;
+        }
+        Kbd {
+            text: item.keys;
+            horizontal-stretch: 0;
+        }
+    }
+}
+
+export component CommandPalette inherits Rectangle {
+    background: Theme.overlay;
+    private property <int> current: 0;
+    private property <string> query;
+
+    init => {
+        Store.palette-filter("");
+        search.focus();
+    }
+
+    TouchArea {
+        clicked => { Store.close-modal(); }
+    }
+
+    Rectangle {
+        y: 96px;
+        width: 560px;
+        height: column.preferred-height;
+        border-radius: 14px;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        drop-shadow-blur: 40px;
+        drop-shadow-offset-y: 16px;
+        drop-shadow-color: #00000090;
+        clip: true;
+
+        TouchArea { }
+
+        column := VerticalLayout {
+            HorizontalLayout {
+                padding: 14px;
+                padding-bottom: 12px;
+                spacing: 10px;
+                Icon {
+                    source: Icons.search;
+                    tint: Theme.text-3;
+                    size: 17px;
+                    y: (parent.height - self.height) / 2;
+                }
+                Rectangle {
+                    height: 26px;
+                    Text {
+                        x: 0;
+                        text: "Digite um comando…";
+                        color: Theme.text-3;
+                        font-size: Theme.fs-lg;
+                        font-family: Theme.font;
+                        visible: root.query == "";
+                    }
+                    search := TextInput {
+                        text <=> root.query;
+                        color: Theme.text;
+                        font-size: Theme.fs-lg;
+                        font-family: Theme.font;
+                        vertical-alignment: center;
+                        edited => {
+                            root.current = 0;
+                            Store.palette-filter(self.text);
+                        }
+                        key-pressed(event) => {
+                            if event.text == Key.DownArrow {
+                                root.current = Math.min(root.current + 1, Store.commands.length - 1);
+                                return accept;
+                            }
+                            if event.text == Key.UpArrow {
+                                root.current = Math.max(root.current - 1, 0);
+                                return accept;
+                            }
+                            if event.text == Key.Return {
+                                if Store.commands.length > 0 { Store.run-command(Store.commands[root.current].id); }
+                                return accept;
+                            }
+                            reject
+                        }
+                    }
+                }
+                Kbd {
+                    text: "Esc";
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+            Divider { }
+            VerticalLayout {
+                padding: 6px;
+                spacing: 2px;
+                if Store.commands.length == 0: Text {
+                    height: 44px;
+                    text: "Nenhum comando encontrado.";
+                    color: Theme.text-3;
+                    font-size: Theme.fs;
+                    font-family: Theme.font;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                for command[i] in Store.commands: Rectangle {
+                    height: 38px;
+                    border-radius: Theme.radius;
+                    background: i == root.current ? Theme.accent-soft : transparent;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 10px;
+                        Text {
+                            horizontal-stretch: 1;
+                            text: command.title;
+                            color: i == root.current ? Theme.text : Theme.text-2;
+                            font-size: Theme.fs;
+                            font-weight: i == root.current ? 600 : 400;
+                            font-family: Theme.font;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: command.group;
+                            color: Theme.text-3;
+                            font-size: Theme.fs-sm;
+                            font-family: Theme.font;
+                            vertical-alignment: center;
+                            horizontal-alignment: right;
+                        }
+                        if command.shortcut != "": Kbd {
+                            text: command.shortcut;
+                            y: (parent.height - self.height) / 2;
+                        }
+                    }
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        moved => { root.current = i; }
+                        clicked => { Store.run-command(command.id); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component Toast inherits Rectangle {
+    in property <ToastData> data;
+    private property <color> tint: data.kind == "error" ? Theme.danger : data.kind == "success" ? Theme.success : data.kind == "warning" ? Theme.warning : Theme.accent;
+    width: 360px;
+    height: row.preferred-height;
+    border-radius: Theme.radius-lg;
+    background: Theme.surface-2;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    drop-shadow-blur: 24px;
+    drop-shadow-offset-y: 8px;
+    drop-shadow-color: #00000080;
+    accessible-role: text;
+    accessible-label: data.title + ". " + data.message;
+    row := HorizontalLayout {
+        padding: 14px;
+        spacing: 12px;
+        Rectangle {
+            width: 3px;
+            border-radius: 2px;
+            background: root.tint;
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 3px;
+            Text {
+                text: root.data.title;
+                color: Theme.text;
+                font-size: Theme.fs;
+                font-weight: 600;
+                font-family: Theme.font;
+            }
+            if root.data.message != "": Text {
+                text: root.data.message;
+                color: Theme.text-2;
+                font-size: Theme.fs-sm;
+                font-family: Theme.font;
+                wrap: word-wrap;
+            }
+        }
+        IconButton {
+            icon: Icons.x;
+            tooltip: "Dispensar";
+            width: 24px;
+            height: 24px;
+            clicked => { Store.dismiss-toast(root.data.id); }
+        }
+    }
+}
+
+export component ToastStack inherits VerticalLayout {
+    spacing: 10px;
+    alignment: end;
+    for toast in Store.toasts: Toast {
+        data: toast;
+    }
+}

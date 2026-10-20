@@ -35,3 +35,21 @@ jobs:
       - name: Teste de fumaca do servidor MCP
         shell: pwsh
         run: node tests/mcp-smoke.mjs artifacts/broker/svault-broker.exe src/svault-mcp/index.mjs
+
+  manager:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        working-directory: src/svault-manager
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Testes do gerenciador
+        run: cargo test --locked
+
+      - name: Compilar o gerenciador
+        run: cargo build --release --locked

@@ -1,0 +1,195 @@
+import { EntryRow, OperationRow, ApprovalRow, HealthData, ToastData, CommandItem, ResultData, EntryForm, AuthorizeForm, ConfirmData } from "types.slint";
+
+export global Store {
+    in-out property <int> page: 0;
+    in property <HealthData> health;
+    in property <bool> loaded: false;
+    in property <[EntryRow]> entries;
+    in property <[OperationRow]> operations;
+    in property <[ApprovalRow]> approvals;
+    in property <int> total-entries;
+    in property <int> total-operations;
+    in-out property <int> selected-entry: -1;
+    in-out property <int> selected-operation: -1;
+    in-out property <int> selected-approval: 0;
+    in-out property <string> entry-filter;
+    in-out property <string> operation-filter;
+    in-out property <bool> busy: false;
+    in property <[ToastData]> toasts;
+
+    in-out property <string> modal;
+    in-out property <EntryForm> entry-form;
+    in-out property <AuthorizeForm> authorize-form;
+    in-out property <int> authorize-step: 0;
+    in-out property <ConfirmData> confirm;
+    in property <ResultData> result;
+    in-out property <string> form-error;
+    in property <[string]> entry-ids;
+    in property <[string]> entry-labels;
+    in property <[CommandItem]> commands;
+
+    in-out property <string> approval-passphrase;
+    in-out property <string> approval-totp;
+
+    in property <image> totp-qr;
+    in property <string> totp-uri;
+
+    callback refresh();
+    callback filter-entries(string);
+    callback filter-operations(string);
+    callback approve(string);
+    callback confirm-submit(string);
+    callback save-entry(EntryForm);
+    callback authorize(AuthorizeForm);
+    callback init-vault(string, string, bool);
+    callback finish-setup();
+    callback dismiss-toast(int);
+    callback palette-filter(string);
+
+    public function close-modal() {
+        modal = "";
+        form-error = "";
+        entry-form.value = "";
+        entry-form.passphrase = "";
+        authorize-form.passphrase = "";
+    }
+
+    public function open-new-entry() {
+        if !health.online || !health.initialized { return; }
+        page = 1;
+        entry-form = { editing: false, kind: 3 };
+        form-error = "";
+        modal = "entry";
+    }
+
+    public function open-edit-entry() {
+        if selected-entry < 0 || selected-entry >= entries.length { return; }
+        entry-form = {
+            editing: true,
+            id: entries[selected-entry].id,
+            kind: entries[selected-entry].kind == "cpf" ? 0 : entries[selected-entry].kind == "password" ? 1 : entries[selected-entry].kind == "token" ? 2 : 3,
+            label: entries[selected-entry].label,
+            targets: entries[selected-entry].targets-text,
+        };
+        form-error = "";
+        modal = "entry";
+    }
+
+    public function open-remove-entry() {
+        if selected-entry < 0 || selected-entry >= entries.length { return; }
+        confirm = {
+            action: "delete-entry",
+            subject: entries[selected-entry].id,
+            title: "Remover segredo",
+            message: "O registro " + entries[selected-entry].id + " e todas as operações que o usam serão removidos definitivamente. Essa ação não pode ser desfeita.",
+            confirm-label: "Remover definitivamente",
+        };
+        form-error = "";
+        modal = "confirm";
+    }
+
+    public function open-authorize() {
+        if !health.online || !health.initialized { return; }
+        page = 2;
+        authorize-form = {
+            entry: 0,
+            method: 1,
+            content-type: "application/json",
+            body: "password={{secret}}",
+            timeout: "30",
+        };
+        authorize-step = 0;
+        form-error = "";
+        modal = "authorize";
+    }
+
+    public function open-revoke() {
+        if selected-operation < 0 || selected-operation >= operations.length { return; }
+        confirm = {
+            action: "revoke-operation",
+            subject: operations[selected-operation].id,
+            title: "Revogar operação",
+            message: "A operação " + operations[selected-operation].id + " deixará de poder usar o segredo. Agentes que dependem dela passarão a receber erro.",
+            confirm-label: "Revogar operação",
+        };
+        form-error = "";
+        modal = "confirm";
+    }
+
+    public function open-reject() {
+        if selected-approval < 0 || selected-approval >= approvals.length { return; }
+        confirm = {
+            action: "reject",
+            subject: approvals[selected-approval].request-id,
+            title: "Rejeitar solicitação",
+            message: "A solicitação de " + approvals[selected-approval].operation + " será descartada e o agente receberá a recusa.",
+            confirm-label: "Rejeitar",
+        };
+        form-error = "";
+        modal = "confirm";
+    }
+
+    public function open-palette() {
+        if modal == "palette" {
+            modal = "";
+        } else if modal == "" {
+            modal = "palette";
+        }
+    }
+
+    public function move-selection(delta: int) {
+        if page == 0 && approvals.length > 0 {
+            selected-approval = Math.clamp(selected-approval + delta, 0, approvals.length - 1);
+        } else if page == 1 && entries.length > 0 {
+            selected-entry = Math.clamp(selected-entry + delta, 0, entries.length - 1);
+        } else if page == 2 && operations.length > 0 {
+            selected-operation = Math.clamp(selected-operation + delta, 0, operations.length - 1);
+        }
+    }
+
+    public function delete-selected() {
+        if page == 0 {
+            open-reject();
+        } else if page == 1 {
+            open-remove-entry();
+        } else if page == 2 {
+            open-revoke();
+        }
+    }
+
+    public function create-in-page() {
+        if page == 2 {
+            open-authorize();
+        } else {
+            open-new-entry();
+        }
+    }
+
+    public function run-command(id: string) {
+        modal = "";
+        if id == "go-approvals" {
+            page = 0;
+        } else if id == "go-entries" {
+            page = 1;
+        } else if id == "go-operations" {
+            page = 2;
+        } else if id == "new-entry" {
+            open-new-entry();
+        } else if id == "authorize" {
+            open-authorize();
+        } else if id == "edit-entry" {
+            page = 1;
+            open-edit-entry();
+        } else if id == "remove-entry" {
+            page = 1;
+            open-remove-entry();
+        } else if id == "revoke" {
+            page = 2;
+            open-revoke();
+        } else if id == "refresh" {
+            refresh();
+        } else if id == "shortcuts" {
+            modal = "shortcuts";
+        }
+    }
+}
