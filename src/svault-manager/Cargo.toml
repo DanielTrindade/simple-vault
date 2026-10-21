@@ -23,6 +23,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 
 [build-dependencies]
 slint-build = "1.18"
+winresource = "0.1"
 
 [profile.release]
 opt-level = 3

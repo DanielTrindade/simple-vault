@@ -1,1 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="#7c8cff"/><path d="M12 5l5 2.2v4.3c0 3.2-2.1 5.4-5 6.5-2.9-1.1-5-3.3-5-6.5V7.2z" fill="#0d0f14"/><path d="M9.6 11.8l1.7 1.7 3.2-3.3" fill="none" stroke="#7c8cff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 64 64">
+<defs>
+<linearGradient id="body" x2="1" y2="1"><stop stop-color="#303d69"/><stop offset="1" stop-color="#101829"/></linearGradient>
+<linearGradient id="metal" x2="1" y2="1"><stop stop-color="#e2e9ff"/><stop offset="0.5" stop-color="#9eadff"/><stop offset="1" stop-color="#6376d9"/></linearGradient>
+</defs>
+<rect x="2" y="2" width="60" height="60" rx="16" fill="url(#body)" stroke="#5d6d9a"/>
+<rect x="9" y="9" width="46" height="46" rx="11" fill="none" stroke="#8396d0" stroke-opacity="0.25"/>
+<rect x="17" y="15" width="32" height="34" rx="8" fill="url(#metal)"/>
+<rect x="20" y="18" width="26" height="28" rx="6" fill="#1b2542"/>
+<path d="M17 24h3m-3 16h3" stroke="#e2e9ff" stroke-width="3" stroke-linecap="round"/>
+<circle cx="33" cy="32" r="8" fill="none" stroke="url(#metal)" stroke-width="2.5"/>
+<path d="M33 24v4m0 8v4m-8-8h4m8 0h4" stroke="#c1cdff" stroke-width="2" stroke-linecap="round"/>
+<circle cx="33" cy="32" r="2.5" fill="#e2e9ff"/>
+<path d="M49 26v12" stroke="#e2e9ff" stroke-width="2.5" stroke-linecap="round"/>
+</svg>
