@@ -39,3 +39,5 @@ finally {
     if (-not $resolved.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Caminho temporario invalido.' }
     Remove-Item -LiteralPath $resolved -Recurse -Force
 }
+
+exit 0
