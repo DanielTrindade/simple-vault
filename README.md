@@ -82,6 +82,19 @@ O gerenciador gráfico pede a senha do cofre a cada ação e aprova as solicita�
 
 ---
 
+## Instalador para Windows
+
+Baixe o arquivo `SVault-Setup-X.Y.Z-x64.exe` em
+[Releases](https://github.com/DanielTrindade/simple-vault/releases).
+Requisitos: Windows 10/11 x64, permissão de administrador, Node.js LTS com npm
+no PATH e internet para preparar o servidor MCP. Não é preciso instalar .NET,
+Rust ou ferramentas de desenvolvimento. Para atualizar, feche o gerenciador e
+execute o instalador novo, sem desinstalar antes.
+
+O instalador gráfico é gerado com `install\Build-Installer.ps1` e salvo em
+`artifacts\installer\`. Veja os pré-requisitos, o comando de build e o comportamento
+de instalação e desinstalação em [install/README.md](install/README.md).
+
 ## Componentes
 
 | Caminho | Papel |

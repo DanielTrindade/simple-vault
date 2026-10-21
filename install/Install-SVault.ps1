@@ -137,6 +137,11 @@ function Assert-RestrictedAcl {
 
 Assert-Administrator
 
+$mcpSmokePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'tests\mcp-smoke.mjs'
+if (-not (Test-Path -LiteralPath $mcpSmokePath -PathType Leaf)) {
+    throw 'Pacote incompleto: tests\mcp-smoke.mjs nao encontrado. Nenhuma alteracao foi aplicada.'
+}
+
 $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 
 Write-Host "Usuario autorizado: $userSid"
@@ -303,7 +308,7 @@ if ($service.Status -ne 'Running') {
 
 & (Join-Path $InstallRoot 'svaultctl.exe') health
 if ($LASTEXITCODE -ne 0) { throw 'A verificacao do protocolo broker health falhou.' }
-& $nodePath (Join-Path (Split-Path -Parent $PSScriptRoot) 'tests\mcp-smoke.mjs') (Join-Path $InstallRoot 'svault-broker.exe') (Join-Path $InstallRoot 'mcp\index.mjs')
+& $nodePath $mcpSmokePath (Join-Path $InstallRoot 'svault-broker.exe') (Join-Path $InstallRoot 'mcp\index.mjs')
 if ($LASTEXITCODE -ne 0) { throw 'O smoke MCP isolado falhou.' }
 
 }

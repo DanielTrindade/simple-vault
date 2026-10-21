@@ -3,12 +3,21 @@ name: build-and-test
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 jobs:
   test:
-    runs-on: windows-latest
+    runs-on: windows-2022
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -19,7 +28,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Compilar
         run: dotnet build src/SVault.Broker/SVault.Broker.csproj -c Release
@@ -36,20 +45,72 @@ jobs:
         shell: pwsh
         run: node tests/mcp-smoke.mjs artifacts/broker/svault-broker.exe src/svault-mcp/index.mjs
 
-  manager:
-    runs-on: windows-latest
+      - name: Testes do pacote e rollback do instalador
+        shell: pwsh
+        run: |
+          ./tests/InstallerPackage.SmokeTest.ps1
+          ./tests/InstallRollback.SmokeTest.ps1
 
-    defaults:
-      run:
-        working-directory: src/svault-manager
+  manager:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: '-C target-feature=+crt-static'
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Testes do gerenciador
-        run: cargo test --locked
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
-      - name: Compilar o gerenciador
-        run: cargo build --release --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Testes do gerenciador
+        run: cargo test --locked --target x86_64-pc-windows-msvc --manifest-path src/svault-manager/Cargo.toml
+
+      - name: Gerar instalador Windows x64 e checksum
+        shell: pwsh
+        run: |
+          $buildArgs = @{}
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $buildArgs.ReleaseTag = $env:GITHUB_REF_NAME }
+          ./install/Build-Installer.ps1 -CargoTarget x86_64-pc-windows-msvc @buildArgs
+
+      - name: Disponibilizar instalador para testes
+        uses: actions/upload-artifact@v4
+        with:
+          name: SVault-installer-windows-x64
+          path: |
+            artifacts/installer/SVault-Setup-*.exe
+            artifacts/installer/SVault-Setup-*.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
+    needs: [test, manager]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: SVault-installer-windows-x64
+          path: installer
+
+      - name: Conferir checksum e publicar Release
+        working-directory: installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          sha256sum --check ./*.sha256
+          gh release create "$RELEASE_TAG" ./*.exe ./*.sha256 \
+            --verify-tag --title "SVault $RELEASE_TAG" --generate-notes
