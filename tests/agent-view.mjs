@@ -4,14 +4,20 @@ const mcpEntry = process.argv[2];
 const pipeName = process.argv[3] ?? "svault.broker.v1";
 
 if (!mcpEntry) {
-  console.error("uso: node agent-view.mjs <index.mjs> [pipe]");
+  console.error("uso: node agent-view.mjs <svault-mcp.exe|index.mjs> [pipe]");
   process.exit(1);
 }
 
-const mcp = spawn(process.execPath, [mcpEntry], {
-  env: { ...process.env, SVAULT_PIPE: pipeName },
-  stdio: ["pipe", "pipe", "pipe"],
-});
+const isNativeExe = mcpEntry.toLowerCase().endsWith(".exe");
+const mcp = isNativeExe
+  ? spawn(mcpEntry, [], {
+      env: { ...process.env, SVAULT_PIPE: pipeName },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+  : spawn(process.execPath, [mcpEntry], {
+      env: { ...process.env, SVAULT_PIPE: pipeName },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
 
 let buffer = "";
 const pending = new Map();

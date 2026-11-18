@@ -1,16 +1,15 @@
 <#
 .SYNOPSIS
-    Instala o SVault: conta de servico dedicada, Windows Service e arvore de arquivos.
+    Instala o SVault (100% Rust): Windows Service e arvore de arquivos isolada.
 
 .DESCRIPTION
     Execute em uma sessao elevada (UAC). O script:
-      1. publica o broker, a CLI e o gerenciador a partir de src\
-      2. cria a conta local svault_svc (senha aleatoria, nunca exibida)
-      3. nega logon interativo, remoto e via rede para essa conta
-      4. restringe a ACL de C:\ProgramData\SVault e de C:\Program Files\SVault
-      5. registra o servico SVaultBroker executando como svault_svc
-      6. grava broker.json com o SID do usuario interativo autorizado
-      7. inicia o servico e verifica o estado
+      1. compila (ou reutiliza com -SkipBuild) broker, CLI, servidor MCP e gerenciador em Rust
+      2. prepara e valida a arvore completa em diretorio temporario antes de tocar no servico
+      3. restringe a ACL de C:\SVault e de C:\ProgramData\SVault
+      4. registra o servico SVaultBroker executando como LocalSystem
+      5. grava broker.json com o SID do usuario interativo autorizado
+      6. inicia o servico e executa os testes de saude e protocolo MCP (com rollback automatico)
 
     Nenhum segredo e lido, escrito ou exibido por este script.
 #>
@@ -38,43 +37,56 @@ function Assert-Administrator {
     }
 }
 
-function Publish-Project {
-    param([string]$Project, [string]$Output)
+function Publish-RustWorkspace {
+    param([string]$RepoRoot, [string]$PublishRoot)
+
+    $binaries = @(
+        @{ Sub = 'broker'; Src = 'svault-broker.exe'; Dst = 'svault-broker.exe' },
+        @{ Sub = 'cli';    Src = 'svaultctl.exe';     Dst = 'svaultctl.exe' },
+        @{ Sub = 'mcp';    Src = 'svault-mcp.exe';    Dst = 'svault-mcp.exe' },
+        @{ Sub = 'manager';Src = 'svault-manager.exe';Dst = 'SVaultManager.exe' }
+    )
 
     if ($SkipBuild) {
-        if (-not (Test-Path -LiteralPath $Output)) { throw "Saida nao encontrada com -SkipBuild: $Output" }
-        return
-    }
-
-    Write-Host "Publicando $Project ..."
-    & dotnet publish $Project -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o $Output --nologo -v q
-    if ($LASTEXITCODE -ne 0) { throw "Falha ao publicar $Project" }
-}
-
-function Publish-RustManager {
-    param([string]$Crate, [string]$Output)
-
-    if ($SkipBuild) {
-        if (-not (Test-Path -LiteralPath (Join-Path $Output 'SVaultManager.exe'))) { throw "Saida nao encontrada com -SkipBuild: $Output" }
+        foreach ($item in $binaries) {
+            $expected = Join-Path (Join-Path $PublishRoot $item.Sub) $item.Dst
+            if (-not (Test-Path -LiteralPath $expected -PathType Leaf)) {
+                throw "Saida nao encontrada com -SkipBuild: $expected"
+            }
+        }
         return
     }
 
     $cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
-    if (-not $cargo) { throw 'Rust (cargo) e necessario para compilar o gerenciador.' }
+    if (-not $cargo) { throw 'Rust (cargo) e necessario para compilar o SVault a partir dos fontes.' }
 
-    Write-Host "Compilando $Crate ..."
-    $cargoArgs = @('build', '--release', '--locked', '--manifest-path', (Join-Path $Crate 'Cargo.toml'))
+    if ($CargoToolchain -match 'gnu' -and (Test-Path -LiteralPath 'C:\msys64\mingw64\bin')) {
+        $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+    }
+
+    Write-Host 'Compilando workspace Rust do SVault ...'
+    $cargoArgs = @(
+        'build', '--release', '--locked',
+        '--manifest-path', (Join-Path $RepoRoot 'Cargo.toml'),
+        '-p', 'svault-broker',
+        '-p', 'svault-cli',
+        '-p', 'svault-mcp',
+        '-p', 'svault-manager'
+    )
     if ($CargoToolchain) { $cargoArgs = @("+$CargoToolchain") + $cargoArgs }
-    # O cargo escreve o progresso em stderr; com EAP=Stop e saida redirecionada (como faz o
-    # Install-SVault-Elevated.cmd), o Windows PowerShell transforma cada linha em erro fatal.
+
     $previousPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try { & $cargo @cargoArgs 2>&1 | ForEach-Object { Write-Host "$_" } }
     finally { $ErrorActionPreference = $previousPreference }
-    if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar $Crate" }
+    if ($LASTEXITCODE -ne 0) { throw 'Falha ao compilar o workspace Rust do SVault.' }
 
-    New-Item -ItemType Directory -Path $Output -Force | Out-Null
-    Copy-Item -LiteralPath (Join-Path $Crate 'target\release\svault-manager.exe') -Destination (Join-Path $Output 'SVaultManager.exe') -Force -ErrorAction Stop
+    $releaseDir = Join-Path $RepoRoot 'target\release'
+    foreach ($item in $binaries) {
+        $outDir = Join-Path $PublishRoot $item.Sub
+        New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $releaseDir $item.Src) -Destination (Join-Path $outDir $item.Dst) -Force -ErrorAction Stop
+    }
 }
 
 function Copy-Tree {
@@ -100,9 +112,6 @@ function Invoke-NativeChecked {
 function Remove-UnexpectedAces {
     param([string]$Root, [string[]]$AllowedSids)
 
-    # icacls /grant:r so substitui as entradas dos SIDs listados; entradas explicitas de outros
-    # SIDs (como a conta svault_svc removida em instalacoes antigas) continuariam na arvore.
-    # O icacls /remove falha (1332) com SIDs orfaos, por isso a remocao usa a API de ACL.
     $paths = @((Get-Item -LiteralPath $Root)) + @(Get-ChildItem -LiteralPath $Root -Force -Recurse)
     foreach ($item in $paths) {
         $acl = $item.GetAccessControl([Security.AccessControl.AccessControlSections]::Access)
@@ -137,9 +146,10 @@ function Assert-RestrictedAcl {
 
 Assert-Administrator
 
-$mcpSmokePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'tests\mcp-smoke.mjs'
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$mcpSmokePath = Join-Path $repoRoot 'tests\Mcp.SmokeTest.ps1'
 if (-not (Test-Path -LiteralPath $mcpSmokePath -PathType Leaf)) {
-    throw 'Pacote incompleto: tests\mcp-smoke.mjs nao encontrado. Nenhuma alteracao foi aplicada.'
+    throw 'Pacote incompleto: tests\Mcp.SmokeTest.ps1 nao encontrado. Nenhuma alteracao foi aplicada.'
 }
 
 $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -162,13 +172,10 @@ if ($null -ne $existingService) {
     }
 }
 
-# 1. Publicacao dos binarios
-$publishRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'artifacts\publish'
+# 1. Publicacao dos binarios Rust
+$publishRoot = Join-Path $repoRoot 'artifacts\publish'
 if (-not $SkipBuild -and (Test-Path -LiteralPath $publishRoot)) { Remove-Item -LiteralPath $publishRoot -Recurse -Force }
-
-Publish-Project -Project (Join-Path $SourceRoot 'SVault.Broker\SVault.Broker.csproj') -Output (Join-Path $publishRoot 'broker')
-Publish-Project -Project (Join-Path $SourceRoot 'SVault.Cli\SVault.Cli.csproj') -Output (Join-Path $publishRoot 'cli')
-Publish-RustManager -Crate (Join-Path $SourceRoot 'svault-manager') -Output (Join-Path $publishRoot 'manager')
+Publish-RustWorkspace -RepoRoot $repoRoot -PublishRoot $publishRoot
 
 # 2. Prepara e valida uma release completa antes de alterar o servico
 $installParent = Split-Path -Parent ([IO.Path]::GetFullPath($InstallRoot))
@@ -176,32 +183,29 @@ if (-not (Test-Path -LiteralPath $installParent)) { New-Item -ItemType Directory
 $releaseStage = Join-Path $installParent ('.SVault-stage-' + [guid]::NewGuid().ToString('N'))
 $releaseBackup = Join-Path $installParent ('.SVault-backup-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $releaseStage -Force | Out-Null
-Copy-Tree -Source (Join-Path $publishRoot 'broker') -Destination $releaseStage
-Copy-Tree -Source (Join-Path $publishRoot 'cli') -Destination $releaseStage
-Copy-Tree -Source (Join-Path $publishRoot 'manager') -Destination $releaseStage
 
-$mcpStage = Join-Path $releaseStage 'mcp'
-Copy-Item -LiteralPath (Join-Path $SourceRoot 'svault-mcp') -Destination $mcpStage -Recurse -Force -ErrorAction Stop
-if (Test-Path -LiteralPath (Join-Path $mcpStage 'node_modules')) {
-    Remove-Item -LiteralPath (Join-Path $mcpStage 'node_modules') -Recurse -Force
-}
-$nodePath = (Get-Command node -ErrorAction SilentlyContinue).Source
-if (-not $nodePath) { throw 'Node.js e necessario para validar e instalar o servidor MCP.' }
-Push-Location $mcpStage
-try {
-    & npm ci --omit=dev
-    if ($LASTEXITCODE -ne 0) { throw 'Falha ao instalar as dependencias de producao do MCP.' }
-    & $nodePath --check (Join-Path $mcpStage 'index.mjs')
-    if ($LASTEXITCODE -ne 0) { throw 'Falha na verificacao de sintaxe do MCP.' }
-    & $nodePath --input-type=module -e "import('@modelcontextprotocol/sdk/server/index.js').then(() => process.exit(0)).catch(() => process.exit(1))"
-    if ($LASTEXITCODE -ne 0) { throw 'Falha no smoke de importacao do SDK MCP.' }
-}
-finally {
-    Pop-Location
+foreach ($component in @('broker', 'cli', 'mcp', 'manager')) {
+    Copy-Tree -Source (Join-Path $publishRoot $component) -Destination $releaseStage
 }
 
-foreach ($required in @('svault-broker.exe', 'svaultctl.exe', 'SVaultManager.exe', 'mcp\index.mjs', 'mcp\node_modules\@modelcontextprotocol\sdk\package.json')) {
-    if (-not (Test-Path -LiteralPath (Join-Path $releaseStage $required) -PathType Leaf)) { throw "Arquivo obrigatorio ausente na release: $required" }
+$mcpCompatStage = Join-Path $releaseStage 'mcp'
+New-Item -ItemType Directory -Path $mcpCompatStage -Force | Out-Null
+$shimSource = Join-Path $SourceRoot 'svault-mcp\index.mjs'
+if (Test-Path -LiteralPath $shimSource -PathType Leaf) {
+    Copy-Item -LiteralPath $shimSource -Destination (Join-Path $mcpCompatStage 'index.mjs') -Force -ErrorAction Stop
+}
+
+$mcpLauncherStage = Join-Path $releaseStage 'svault-mcp.cmd'
+@(
+    '@echo off',
+    'rem Servidor MCP nativo do cofre SVault (Rust). Nao contem segredos: apenas encaminha comandos ao broker.',
+    '"%~dp0svault-mcp.exe" %*'
+) | Set-Content -LiteralPath $mcpLauncherStage -Encoding ASCII
+
+foreach ($required in @('svault-broker.exe', 'svaultctl.exe', 'svault-mcp.exe', 'SVaultManager.exe', 'svault-mcp.cmd')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $releaseStage $required) -PathType Leaf)) {
+        throw "Arquivo obrigatorio ausente na release: $required"
+    }
 }
 
 $hadInstallRoot = Test-Path -LiteralPath $InstallRoot
@@ -221,96 +225,84 @@ if (Test-Path -LiteralPath $DataRoot) {
     $dataPaths = @((Get-Item -LiteralPath $DataRoot)) + @(Get-ChildItem -LiteralPath $DataRoot -Force -Recurse)
     foreach ($path in $dataPaths) { $originalDataAcls += [pscustomobject]@{ Path = $path.FullName; Acl = Get-Acl -LiteralPath $path.FullName } }
 }
+
 try {
-if ($wasServiceRunning) {
-    Write-Host "Parando o servico $ServiceName para ativar a release validada ..."
-    Stop-Service -Name $ServiceName -Force
-    Start-Sleep -Seconds 2
-}
-
-if ($hadInstallRoot) {
-    Move-Item -LiteralPath $InstallRoot -Destination $releaseBackup -ErrorAction Stop
-    $oldMovedToBackup = $true
-}
-Move-Item -LiteralPath $releaseStage -Destination $InstallRoot -ErrorAction Stop
-$installActivated = $true
-
-# 4. Servidor MCP
-$mcpTarget = Join-Path $InstallRoot 'mcp'
-
-$mcpLauncher = Join-Path $InstallRoot 'svault-mcp.cmd'
-@(
-    '@echo off',
-    "rem Servidor MCP do cofre SVault. Nao contem segredos: apenas encaminha comandos ao broker.",
-    "`"$nodePath`" `"$mcpTarget\index.mjs`""
-) | Set-Content -LiteralPath $mcpLauncher -Encoding ASCII
-
-# 5. Arvore de dados
-if (-not (Test-Path -LiteralPath $DataRoot)) { New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null }
-foreach ($sub in @('state', 'logs')) {
-    $path = Join-Path $DataRoot $sub
-    if (-not (Test-Path -LiteralPath $path)) { New-Item -ItemType Directory -Path $path -Force | Out-Null }
-}
-
-# 7. ACLs
-Write-Host 'Aplicando ACLs ...'
-Invoke-NativeChecked -File 'icacls.exe' -Arguments @($InstallRoot, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX')
-Invoke-NativeChecked -File 'icacls.exe' -Arguments @($DataRoot, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', "*$userSid`:(OI)(CI)RX")
-Remove-UnexpectedAces -Root $InstallRoot -AllowedSids @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-32-545')
-Remove-UnexpectedAces -Root $DataRoot -AllowedSids @('S-1-5-18', 'S-1-5-32-544', $userSid)
-$readRights = [Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize -bor [Security.AccessControl.FileSystemRights]::ReadAttributes -bor [Security.AccessControl.FileSystemRights]::ReadExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::ReadPermissions -bor [Security.AccessControl.FileSystemRights]::ListDirectory
-$fullRights = [Security.AccessControl.FileSystemRights]::FullControl
-Assert-RestrictedAcl -Root $InstallRoot -AllowedRights @{ 'S-1-5-18' = $fullRights; 'S-1-5-32-544' = $fullRights; 'S-1-5-32-545' = $readRights }
-Assert-RestrictedAcl -Root $DataRoot -AllowedRights @{ 'S-1-5-18' = $fullRights; 'S-1-5-32-544' = $fullRights; $userSid = $readRights }
-
-# 8. Configuracao do broker
-$brokerConfig = @{
-    version            = '1.0.0'
-    allowedClientSids  = @($userSid)
-    approvalTtlSeconds = 180
-    unlockTtlSeconds   = 300
-} | ConvertTo-Json -Depth 4
-Set-Content -LiteralPath (Join-Path $DataRoot 'broker.json') -Value $brokerConfig -Encoding UTF8
-
-# 9. Servico
-# O sc.exe aceita apenas um token sem espacos no binPath: por isso o executavel fica em
-# C:\SVault e o diretorio de dados chega ao processo pela variavel de ambiente do servico.
-$binPath = "$InstallRoot\svault-broker.exe"
-
-if ($null -eq $existingService) {
-    Write-Host "Registrando o servico $ServiceName ..."
-    Write-Host "  binPath: $binPath"
-    $scOutput = & sc.exe create $ServiceName binPath= $binPath start= auto DisplayName= "$ServiceDisplayName" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Falha ao criar o servico: $scOutput"
+    if ($wasServiceRunning) {
+        Write-Host "Parando o servico $ServiceName para ativar a release validada ..."
+        Stop-Service -Name $ServiceName -Force
+        Start-Sleep -Seconds 2
     }
-    $serviceCreated = $true
-}
 
-# Variaveis de ambiente do servico (o SCM as injeta no processo)
-New-ItemProperty -Path $serviceKey -Name 'Environment' -PropertyType MultiString -Value @("SVAULT_HOME=$DataRoot") -Force | Out-Null
+    if ($hadInstallRoot) {
+        Move-Item -LiteralPath $InstallRoot -Destination $releaseBackup -ErrorAction Stop
+        $oldMovedToBackup = $true
+    }
+    Move-Item -LiteralPath $releaseStage -Destination $InstallRoot -ErrorAction Stop
+    $installActivated = $true
 
-if ($serviceCreated) {
-    Invoke-NativeChecked -File 'sc.exe' -Arguments @('description', $ServiceName, 'Broker de credenciais isolado do SVault. Executa como LocalSystem; os valores ficam cifrados pela senha do cofre.')
-    Invoke-NativeChecked -File 'sc.exe' -Arguments @('failure', $ServiceName, 'reset=', '86400', 'actions=', 'restart/60000/restart/60000/restart/60000')
-    Invoke-NativeChecked -File 'sc.exe' -Arguments @('failureflag', $ServiceName, '1')
-}
-Start-Sleep -Seconds 1
+    # Arvore de dados
+    if (-not (Test-Path -LiteralPath $DataRoot)) { New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null }
+    foreach ($sub in @('state', 'logs')) {
+        $path = Join-Path $DataRoot $sub
+        if (-not (Test-Path -LiteralPath $path)) { New-Item -ItemType Directory -Path $path -Force | Out-Null }
+    }
 
-# 10. Inicializacao e verificacao
-Write-Host 'Iniciando o servico ...'
-Start-Service -Name $ServiceName
-Start-Sleep -Seconds 3
-$service = Get-Service -Name $ServiceName
-if ($service.Status -ne 'Running') {
-    throw "O servico nao ficou em execucao. Estado: $($service.Status). Consulte $DataRoot\logs\svault-broker.log"
-}
+    # ACLs
+    Write-Host 'Aplicando ACLs ...'
+    Invoke-NativeChecked -File 'icacls.exe' -Arguments @($InstallRoot, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX')
+    Invoke-NativeChecked -File 'icacls.exe' -Arguments @($DataRoot, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', "*$userSid`:(OI)(CI)RX")
+    Remove-UnexpectedAces -Root $InstallRoot -AllowedSids @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-32-545')
+    Remove-UnexpectedAces -Root $DataRoot -AllowedSids @('S-1-5-18', 'S-1-5-32-544', $userSid)
+    $readRights = [Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize -bor [Security.AccessControl.FileSystemRights]::ReadAttributes -bor [Security.AccessControl.FileSystemRights]::ReadExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::ReadPermissions -bor [Security.AccessControl.FileSystemRights]::ListDirectory
+    $fullRights = [Security.AccessControl.FileSystemRights]::FullControl
+    Assert-RestrictedAcl -Root $InstallRoot -AllowedRights @{ 'S-1-5-18' = $fullRights; 'S-1-5-32-544' = $fullRights; 'S-1-5-32-545' = $readRights }
+    Assert-RestrictedAcl -Root $DataRoot -AllowedRights @{ 'S-1-5-18' = $fullRights; 'S-1-5-32-544' = $fullRights; $userSid = $readRights }
 
-& (Join-Path $InstallRoot 'svaultctl.exe') health
-if ($LASTEXITCODE -ne 0) { throw 'A verificacao do protocolo broker health falhou.' }
-& $nodePath $mcpSmokePath (Join-Path $InstallRoot 'svault-broker.exe') (Join-Path $InstallRoot 'mcp\index.mjs')
-if ($LASTEXITCODE -ne 0) { throw 'O smoke MCP isolado falhou.' }
+    # Configuracao do broker
+    $brokerConfig = @{
+        version            = '1.0.0'
+        allowedClientSids  = @($userSid)
+        approvalTtlSeconds = 180
+        unlockTtlSeconds   = 300
+    } | ConvertTo-Json -Depth 4
+    [IO.File]::WriteAllText((Join-Path $DataRoot 'broker.json'), $brokerConfig, [Text.UTF8Encoding]::new($false))
 
+    # Servico Windows
+    $binPath = "$InstallRoot\svault-broker.exe"
+    if ($null -eq $existingService) {
+        Write-Host "Registrando o servico $ServiceName ..."
+        Write-Host "  binPath: $binPath"
+        $scOutput = & sc.exe create $ServiceName binPath= $binPath start= auto DisplayName= "$ServiceDisplayName" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Falha ao criar o servico: $scOutput"
+        }
+        $serviceCreated = $true
+    }
+
+    New-ItemProperty -Path $serviceKey -Name 'Environment' -PropertyType MultiString -Value @("SVAULT_HOME=$DataRoot") -Force | Out-Null
+
+    if ($serviceCreated) {
+        Invoke-NativeChecked -File 'sc.exe' -Arguments @('description', $ServiceName, 'Broker de credenciais isolado do SVault (Rust). Executa como LocalSystem; os valores ficam cifrados pela senha do cofre.')
+        Invoke-NativeChecked -File 'sc.exe' -Arguments @('failure', $ServiceName, 'reset=', '86400', 'actions=', 'restart/60000/restart/60000/restart/60000')
+        Invoke-NativeChecked -File 'sc.exe' -Arguments @('failureflag', $ServiceName, '1')
+    }
+    Start-Sleep -Seconds 1
+
+    # Inicializacao e verificacao
+    Write-Host 'Iniciando o servico ...'
+    Start-Service -Name $ServiceName
+    Start-Sleep -Seconds 2
+    $service = Get-Service -Name $ServiceName
+    if ($service.Status -ne 'Running') {
+        throw "O servico nao ficou em execucao. Estado: $($service.Status). Consulte $DataRoot\logs\svault-broker.log"
+    }
+
+    & (Join-Path $InstallRoot 'svaultctl.exe') health
+    if ($LASTEXITCODE -ne 0) { throw 'A verificacao do protocolo broker health falhou.' }
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $mcpSmokePath `
+        -BrokerExe (Join-Path $InstallRoot 'svault-broker.exe') `
+        -McpExe (Join-Path $InstallRoot 'svault-mcp.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'O smoke MCP isolado falhou.' }
 }
 catch {
     $failure = $_
@@ -367,8 +359,8 @@ if (Test-Path -LiteralPath $releaseBackup) {
     catch { Write-Warning "A release anterior foi mantida em $releaseBackup porque nao pode ser removida." }
 }
 
-# 3. Skill e conta antiga sao tratadas somente depois de validar a release ativa
-$skillSource = Join-Path (Split-Path -Parent $PSScriptRoot) 'skills\svault\SKILL.md'
+# Skill e conta legada sao tratadas somente depois de validar a release ativa
+$skillSource = Join-Path $repoRoot 'skills\svault\SKILL.md'
 if (Test-Path -LiteralPath $skillSource) {
     $skillTargets = @(
         (Join-Path $env:USERPROFILE '.claude\skills\svault\SKILL.md'),

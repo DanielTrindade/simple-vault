@@ -33,12 +33,10 @@ Name: "desktopicon"; Description: "Criar atalho na área de trabalho"; Flags: un
 Source: "Install-SVault.ps1"; DestDir: "{tmp}\svault-package\install"; Flags: deleteafterinstall
 Source: "Run-Install.ps1"; DestDir: "{tmp}\svault-package\install"; Flags: deleteafterinstall
 Source: "SVaultRollback.ps1"; DestDir: "{tmp}\svault-package\install"; Flags: deleteafterinstall
-Source: "..\tests\mcp-smoke.mjs"; DestDir: "{tmp}\svault-package\tests"; Flags: deleteafterinstall
+Source: "..\tests\Mcp.SmokeTest.ps1"; DestDir: "{tmp}\svault-package\tests"; Flags: deleteafterinstall
 Source: "Uninstall-SVault.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\artifacts\publish\*"; DestDir: "{tmp}\svault-package\artifacts\publish"; Flags: recursesubdirs createallsubdirs deleteafterinstall
 Source: "..\src\svault-mcp\index.mjs"; DestDir: "{tmp}\svault-package\src\svault-mcp"; Flags: deleteafterinstall
-Source: "..\src\svault-mcp\package.json"; DestDir: "{tmp}\svault-package\src\svault-mcp"; Flags: deleteafterinstall
-Source: "..\src\svault-mcp\package-lock.json"; DestDir: "{tmp}\svault-package\src\svault-mcp"; Flags: deleteafterinstall
 
 [Icons]
 Name: "{group}\SVault"; Filename: "C:\SVault\SVaultManager.exe"
@@ -48,14 +46,6 @@ Name: "{autodesktop}\SVault"; Filename: "C:\SVault\SVaultManager.exe"; Tasks: de
 Filename: "C:\SVault\SVaultManager.exe"; Description: "Abrir o SVault"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [Code]
-function PrepareToInstall(var NeedsRestart: Boolean): String;
-var Code: Integer;
-begin
-  Result := '';
-  if not Exec(ExpandConstant('{sys}\cmd.exe'), '/C "node --version && npm --version"', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
-    Result := 'Instale o Node.js LTS com npm e conexão à internet para preparar o servidor MCP.';
-end;
-
 procedure CurStepChanged(CurStep: TSetupStep);
 var Code: Integer;
 begin
