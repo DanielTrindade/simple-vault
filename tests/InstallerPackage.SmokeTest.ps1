@@ -11,11 +11,14 @@ try {
         New-Item -ItemType Directory -Path $destination -Force | Out-Null
         Copy-Item -LiteralPath $source -Destination $destination
     }
-    foreach ($relative in @('install\Install-SVault.ps1', 'install\Run-Install.ps1', 'install\SVaultRollback.ps1', 'tests\mcp-smoke.mjs', 'src\svault-mcp\index.mjs', 'src\svault-mcp\package-lock.json')) {
+    foreach ($relative in @('install\Install-SVault.ps1', 'install\Run-Install.ps1', 'install\SVaultRollback.ps1', 'tests\Mcp.SmokeTest.ps1', 'src\svault-mcp\index.mjs')) {
         if (-not (Test-Path -LiteralPath (Join-Path $package $relative))) { throw "Dependencia do instalador ausente no pacote: $relative" }
     }
-    & node --check (Join-Path $package 'tests\mcp-smoke.mjs')
-    if ($LASTEXITCODE -ne 0) { throw 'Teste MCP empacotado invalido.' }
+    $tokens = $null
+    $parseErrors = $null
+    [void][Management.Automation.Language.Parser]::ParseFile((Join-Path $package 'tests\Mcp.SmokeTest.ps1'), [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count -gt 0) { throw "Teste MCP empacotado invalido: $($parseErrors[0].Message)" }
+
     $entry = Join-Path $package 'install\Install-SVault.ps1'
     $log = Join-Path $package 'install-test.log'
     [IO.File]::WriteAllText($entry, "throw 'falha-simulada-atualizacao'", [Text.UTF8Encoding]::new($false))

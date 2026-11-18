@@ -1,4 +1,4 @@
-# SVault — cofre de credenciais para agentes de IA
+# SVault — cofre de credenciais para agentes de IA (Full Rust)
 
 Cofre de dados sensíveis (CPF, senhas, tokens) para uso por agentes como Claude Code,
 Codex e OpenCode **sem que os valores entrem no contexto do modelo**.
@@ -7,29 +7,9 @@ O agente conhece apenas **identificadores** (`CPF_PESSOAL`, `SENHA_PORTAL_A`). P
 segredo, ele pede a execução de uma **operação previamente autorizada** por você. O broker
 executa a operação com o segredo e devolve apenas um **resultado sanitizado**.
 
----
-
-## Estado atual nesta máquina
-
-| Item | Situação |
-|---|---|
-| Serviço `SVaultBroker` | instalado, `Running`, início automático |
-| Binários | `C:\SVault\` (broker, `svaultctl.exe`, `SVaultManager.exe`, `mcp\`) |
-| Dados e log | `C:\ProgramData\SVault\` |
-| MCP em opencode | `~/.config/opencode/opencode.jsonc` → `mcp.svault` |
-| MCP no Claude Code | `~/.claude.json` (escopo user) → `svault` |
-| MCP no Codex | `~/.codex/config.toml` → `[mcp_servers.svault]` |
-| Cofre | **não inicializado** — falta você definir a senha do cofre |
-| Testes do código desta branch | broker 40/40, MCP 9/9, rollback simulado 6/6; validações complementares documentadas |
-
-**Próximo passo (você, fora do contexto do agente):**
-
-```powershell
-& "C:\SVault\svaultctl.exe" init --totp
-```
-
-Depois cadastre os segredos com `svaultctl add` ou pela interface `SVaultManager.exe`.
-O gerenciador gráfico pede a senha do cofre a cada ação e aprova as solicitações dos agentes.
+Todo o ecossistema do SVault — núcleo criptográfico, broker Windows Service, cliente do pipe,
+CLI (`svaultctl`), servidor MCP (`svault-mcp`) e interface gráfica (`SVaultManager`) — é
+implementado **100% em Rust**, sem dependência de runtime .NET ou Node.js.
 
 ---
 
@@ -45,16 +25,16 @@ O gerenciador gráfico pede a senha do cofre a cada ação e aprova as solicita�
               └───────────────┬───────────────┘                            │      │ (+ TOTP)
                               ▼                                            │      ▼
                    ┌──────────────────────┐                                │  ┌────────────┐
-                   │   svault-mcp (Node)  │  cliente fino do pipe          │  │  aprovação │
+                   │   svault-mcp (Rust)  │  cliente fino do pipe          │  │  aprovação │
                    │  NÃO guarda segredos │                                │  └─────┬──────┘
                    └──────────┬───────────┘                                │        │
                               │  \\.\pipe\svault.broker.v1                 │        │
                               │  (DACL: SYSTEM, Admins, seu SID)           │        │
-                              ▼                                          │        │
+                              ▼                                            │        │
                    ┌──────────────────────────────────────────────┐        │        │
-                   │  SVaultBroker (Windows Service, LocalSystem)  │◄───────┘────────┘
+                   │  SVaultBroker (Rust, Windows Service/SYSTEM) │◄───────┘────────┘
                    │  • guarda os segredos (memória + CredMan)    │
-                   │  • executa só operações pre-autorizadas      │
+                   │  • executa só operações pré-autorizadas      │
                    │  • redige o segredo de toda saída            │
                    └───────────────┬──────────────────────────────┘
                                    │
@@ -62,9 +42,9 @@ O gerenciador gráfico pede a senha do cofre a cada ação e aprova as solicita�
               ▼                                          ▼
    ┌────────────────────────┐              ┌──────────────────────────┐
    │ Windows Credential Mgr │              │  Alvo autorizado         │
-   │ (perfil do SYSTEM) +   │              │  (portal, API, processo)  │
+   │ (perfil do SYSTEM) +   │              │  (portal, API)           │
    │ AES-256-GCM com a sua  │              │  recebe o segredo real   │
-   │ senha do cofre         │              │  nunca o modelo           │
+   │ senha do cofre         │              │  nunca o modelo          │
    └────────────────────────┘              └──────────────────────────┘
 ```
 
@@ -73,7 +53,7 @@ O gerenciador gráfico pede a senha do cofre a cada ação e aprova as solicita�
 | Camada | Proteção | Contra quem |
 |---|---|---|
 | Serviço como LocalSystem | processo em contexto de sistema, não do seu usuário | agente no seu terminal, sem elevação |
-| CredMan + DPAPI | valores atrestados no perfil do SYSTEM | leitura direta do cofre pelo agente |
+| CredMan + DPAPI | valores atrelados ao perfil do SYSTEM | leitura direta do cofre pelo agente |
 | AES-256-GCM + PBKDF2 | valores ainda cifrados pela sua senha do cofre | administrador local / dump de LSA |
 | Aprovação por operação | cada uso do segredo exige a sua senha do cofre | automação descontrolada do agente |
 | TOTP (opcional) | segundo fator do seu celular | roubo da senha do cofre |
@@ -86,68 +66,59 @@ O gerenciador gráfico pede a senha do cofre a cada ação e aprova as solicita�
 
 Baixe o arquivo `SVault-Setup-X.Y.Z-x64.exe` em
 [Releases](https://github.com/DanielTrindade/simple-vault/releases).
-Requisitos: Windows 10/11 x64, permissão de administrador, Node.js LTS com npm
-no PATH e internet para preparar o servidor MCP. Não é preciso instalar .NET,
-Rust ou ferramentas de desenvolvimento. Para atualizar, feche o gerenciador e
-execute o instalador novo, sem desinstalar antes.
+Requisitos: Windows 10/11 x64 e permissão de administrador. Não é preciso instalar .NET,
+Node.js, Rust, internet nem ferramentas de desenvolvimento. Para atualizar, feche o
+gerenciador e execute o instalador novo, sem desinstalar antes (cofres existentes são
+100% compatíveis em formato binário e JSON).
 
 O instalador gráfico é gerado com `install\Build-Installer.ps1` e salvo em
-`artifacts\installer\`. Veja os pré-requisitos, o comando de build e o comportamento
-de instalação e desinstalação em [install/README.md](install/README.md).
+`artifacts\installer\`. Veja os detalhes em [install/README.md](install/README.md).
 
-## Componentes
+## Componentes (Workspace Cargo)
 
 | Caminho | Papel |
 |---|---|
-| `src/SVault.Core` | criptografia, Credential Manager, store, redação, motor de operações, TOTP |
-| `src/SVault.Broker` | Windows Service + named pipe + despacho de comandos + fluxo de aprovação |
-| `src/SVault.Client` | cliente do pipe (usado pela CLI e pela GUI) |
-| `src/SVault.Cli` | `svaultctl` — administration e automação |
-| `src/svault-manager` | `SVaultManager.exe` — interface gráfica em Rust/Slint (fase 1 da migração) |
-| `src/svault-mcp` | servidor MCP (stdio) para os agentes |
-| `install/` | instalador e desinstalador elevados |
-| `tests/` | testes de fumaça com dados fictícios |
+| `src/svault-core` | criptografia (`PBKDF2`, `HKDF`, `AES-256-GCM`, `TOTP`), Credential Manager, LSA, store, redação, motor de operações |
+| `src/svault-broker` | `svault-broker.exe` — Windows Service `SVaultBroker` + named pipe com DACL + fluxo de aprovação |
+| `src/svault-client` | cliente do pipe com buffers `Zeroizing` + leitura segura de console (`SecureInput`) |
+| `src/svault-cli` | `svaultctl.exe` — administração e automação via linha de comando |
+| `src/svault-mcp` | `svault-mcp.exe` — servidor MCP nativo (stdio JSON-RPC) para os agentes (+ shim `index.mjs` para caminhos legados) |
+| `src/svault-manager` | `SVaultManager.exe` — interface gráfica em Rust/Slint |
+| `install/` | instalador e desinstalador elevados com rollback atômico |
+| `tests/svault-smoke` | suíte completa de regressão, broker isolado e servidor MCP nativo |
+| `tests/svault-demo` | demonstração ponta a ponta com dados fictícios |
 
 Instalação final:
 
 - `C:\SVault\svault-broker.exe` — broker (Windows Service `SVaultBroker`)
 - `C:\SVault\svaultctl.exe` — CLI
+- `C:\SVault\svault-mcp.exe` — servidor MCP nativo (`svault-mcp.cmd` e `mcp\index.mjs` mantidos por compatibilidade)
 - `C:\SVault\SVaultManager.exe` — interface gráfica
-- `C:\SVault\mcp\index.mjs` — servidor MCP
 - `C:\ProgramData\SVault\` — estado, log e configuração (ACL restrita)
 
-### Gerenciador em Rust (`src/svault-manager`)
+### Compilação manual
 
-Primeira fase da migração para Rust: só a interface foi reescrita. Ela fala o mesmo protocolo
-do pipe (`4 bytes LE + JSON`) com o broker atual, então o cofre, o MCP e a CLI não mudam.
-
-- Barra lateral com Aprovações, Registros e Operações; lista com painel de detalhes.
-- Aprovação com senha e TOTP no próprio painel, contagem regressiva e resultado sanitizado.
-- Assistente em etapas para autorizar operações (HTTP, processo via stdin, eco de teste).
-- Primeiro uso pela interface, com QR code do TOTP.
-- Paleta de comandos (`Ctrl+K`), atalhos (`Ctrl+1/2/3`, `Ctrl+N`, `Ctrl+Enter`, `Del`, `F5`, `?`).
-- Senhas copiadas para `Zeroizing<String>` e a requisição montada em buffer pré-alocado e
-  zerado após o envio.
-
-O instalador compila o gerenciador com `cargo` e o instala como `C:\SVault\SVaultManager.exe`.
-Sem MSVC, passe `-CargoToolchain stable-x86_64-pc-windows-gnu` ao `Install-SVault.ps1`.
-
-Compilação manual (com Build Tools do Visual Studio e o workload C++):
+Com Build Tools do Visual Studio (workload C++):
 
 ```powershell
-cd src\svault-manager
-cargo build --release
-cargo test
+cargo build --workspace --release
+cargo test --workspace
 ```
 
 Sem MSVC, use o toolchain GNU (`rustup toolchain install stable-x86_64-pc-windows-gnu`) com um
-MinGW de 64 bits no `PATH` e rode `cargo +stable-x86_64-pc-windows-gnu build --release`.
+MinGW de 64 bits no `PATH`:
 
-`SVAULT_PIPE` aponta o gerenciador para outro pipe, como no servidor MCP. Para testar com dados
+```powershell
+$env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+cargo +stable-x86_64-pc-windows-gnu build --workspace --release
+cargo +stable-x86_64-pc-windows-gnu test --workspace
+```
+
+`SVAULT_PIPE` aponta a CLI, o servidor MCP e o gerenciador para outro pipe. Para testar com dados
 fictícios, suba um broker isolado e abra o gerenciador apontando para ele:
 
 ```powershell
-svault-broker.exe --console --home $env:TEMP\svault-demo --pipe svault.demo --in-memory-credentials
+.\target\release\svault-broker.exe --console --home $env:TEMP\svault-demo --pipe svault.demo --in-memory-credentials
 $env:SVAULT_PIPE = "svault.demo"; .\target\release\svault-manager.exe
 ```
 
@@ -191,7 +162,7 @@ Ou use a interface gráfica:
   --param usuario
 ```
 
-- `--action http.request` → faz um POST no alvo fixo, injetando o segredo no corpo.
+- `--action http.request` → faz requisição HTTP no alvo fixo, injetando o segredo no corpo/cabeçalhos.
 - `process.stdin` está desabilitado no broker até existir execução sob identidade restrita com validação de executável, dependências e destino. Operações `process.stdin` já cadastradas também são recusadas.
 - `--action noop.echo` → diagnóstico: devolve o segredo mascarado, sem tocar na rede.
 
@@ -244,36 +215,7 @@ O agente **nunca** recebe o valor: nem no `body`, nem em log, nem em mensagem de
 | `vault_operation_status` | status + resultado sanitizado |
 
 Não existe `get_secret`, `read_password`, `export` nem equivalente. O servidor MCP é um
-cliente fino: **não guarda segredos** e só encaminha comandos ao broker.
-
----
-
-## Skill `svault` (instrução para os agentes)
-
-As descrições das ferramentas dizem o que cada uma faz, mas não o *fluxo*. A skill ensina o
-agente a usar o cofre corretamente — e a **não** tentar contorná-lo.
-
-Instalada nos três agentes:
-
-| Agente | Caminho |
-|---|---|
-| Claude Code | `~/.claude/skills/svault/SKILL.md` |
-| OpenCode | `~/.config/opencode/skills/svault/SKILL.md` |
-| Codex | `~/.codex/skills/svault/SKILL.md` |
-
-Ponteiro para a memória global de cada agente: `~/.claude/CLAUDE.md`,
-`~/.config/opencode/AGENTS.md`, `~/.codex/AGENTS.md`.
-
-O que a skill ensina: listar operações → solicitar → **aguardar a aprovação** → ler o
-resultado sanitizado; e o que proíbe: pedir a credencial no chat, ler arquivos do cofre,
-inventar `get_secret`, ou fazer a requisição autenticada por conta própria.
-
-Verificação (Claude Code, sessão nova):
-
-```
-> claude -p "liste as skills disponíveis que começam com sv"
-svault
-```
+binário nativo fino (`svault-mcp.exe`): **não guarda segredos** e só encaminha comandos ao broker.
 
 ---
 
@@ -282,10 +224,10 @@ svault
 ```powershell
 & "C:\SVault\svaultctl.exe" list                      # registros (só metadados)
 & "C:\SVault\svaultctl.exe" ops                       # operações autorizadas
-& "C:\SVault\svaultctl.exe" update --id CPF_PESSOAL   # novo valor
+& "C:\SVault\svaultctl.exe" update --id CPF_PESSOAL --value  # novo valor
 & "C:\SVault\svaultctl.exe" remove --id CPF_PESSOAL   # apaga o segredo
 & "C:\SVault\svaultctl.exe" revoke --id login_portal_a
-& "C:\SVault\svaultctl.exe" change-passphrase        # re-sela todos os segredos
+& "C:\SVault\svaultctl.exe" change-passphrase         # re-sela todos os segredos
 & "C:\SVault\svaultctl.exe" disable-totp
 ```
 
@@ -296,31 +238,16 @@ Log de auditoria (sem segredos): `C:\ProgramData\SVault\logs\svault-broker.log`.
 ## Testes
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\tests\run-smoke.ps1
-node .\tests\mcp-smoke.mjs .\artifacts\broker\svault-broker.exe .\src\svault-mcp\index.mjs
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run-smoke.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Mcp.SmokeTest.ps1 -BrokerExe .\artifacts\broker\svault-broker.exe -McpExe .\artifacts\broker\svault-mcp.exe
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\InstallerPackage.SmokeTest.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\InstallRollback.SmokeTest.ps1
 ```
-
-O teste do broker sobe uma instância isolada com armazenamento de credenciais em memória,
-diretório temporário, pipe próprio e servidor HTTP local. Os 40 cenários cobrem fluxos de
-aprovação, revogação, rotação, sanitização e validação de destinos. O teste de rollback usa
-ações simuladas e não instala o produto nem altera serviços ou permissões reais.
-
-### Revisão e validações pendentes
-
-- [Levantamento original](docs/REVISAO-LOGICA-NEGOCIO-2026-10-20.md).
-- [Correções e evidências](docs/IMPLEMENTACAO-REVISAO-2026-10-20.md).
-- [Parecer independente e reavaliação final](docs/VALIDACAO-REVISAO-2026-10-20.md#9-adendo--reavaliação-da-primeira-rodada-de-correções).
-- [Pendências de validação, impactos e critérios de conclusão](docs/PENDENCIAS-VALIDACAO.md).
-
-As seis pendências A02, A13, A15, A22, A23 e A24 têm alterações implementadas e validação
-complementar em aberto. A02 e A24 têm prioridade antes de distribuir ou atualizar instalações
-com credenciais importantes. As mudanças desta branch não foram instaladas no ambiente real.
 
 ---
 
 ## Limites de segurança
 
-Leia `docs/LIMITES.md`. Em resumo: **um agente com acesso irrestrito ao terminal e elevação
+Leia [docs/LIMITES.md](docs/LIMITES.md). Em resumo: **um agente com acesso irrestrito ao terminal e elevação
 administrativa é uma ameaça ao modelo inteiro** — o SVault reduz o escopo do dano, mas não
-elimina um atacante com privileges de administrador no seu usuário.
+elimina um atacante com privilégios de administrador no seu usuário.

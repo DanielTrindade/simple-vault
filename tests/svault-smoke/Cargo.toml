@@ -1,0 +1,20 @@
+[package]
+name = "svault-smoke"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "svault-smoke"
+path = "src/main.rs"
+
+[dependencies]
+svault-core = { path = "../../src/svault-core" }
+svault-client = { path = "../../src/svault-client" }
+svault-broker = { path = "../../src/svault-broker" }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+zeroize.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

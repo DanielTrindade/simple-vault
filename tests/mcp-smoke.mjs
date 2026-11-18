@@ -7,7 +7,7 @@ const brokerExe = process.argv[2];
 const mcpEntry = process.argv[3];
 
 if (!brokerExe || !mcpEntry) {
-  console.error("uso: node mcp-smoke.mjs <svault-broker.exe> <index.mjs>");
+  console.error("uso: node mcp-smoke.mjs <svault-broker.exe> <svault-mcp.exe|index.mjs>");
   process.exit(1);
 }
 
@@ -33,12 +33,18 @@ const broker = spawn(brokerExe, ["--console", "--in-memory-credentials", "--home
 broker.stdout.on("data", () => {});
 broker.stderr.on("data", (d) => process.stderr.write(`  [broker] ${d}`));
 
-await new Promise((r) => setTimeout(r, 2500));
+await new Promise((r) => setTimeout(r, 1500));
 
-const mcp = spawn(process.execPath, [mcpEntry], {
-  env: { ...process.env, SVAULT_PIPE: pipeName },
-  stdio: ["pipe", "pipe", "pipe"],
-});
+const isNativeExe = mcpEntry.toLowerCase().endsWith(".exe");
+const mcp = isNativeExe
+  ? spawn(mcpEntry, [], {
+      env: { ...process.env, SVAULT_PIPE: pipeName },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+  : spawn(process.execPath, [mcpEntry], {
+      env: { ...process.env, SVAULT_PIPE: pipeName },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
 
 let buffer = "";
 const pending = new Map();

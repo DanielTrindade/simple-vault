@@ -22,28 +22,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
+      - uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
+      - name: Testes unitarios do workspace Rust
+        run: cargo test --workspace --locked --target x86_64-pc-windows-msvc
 
-      - name: Compilar
-        run: dotnet build src/SVault.Broker/SVault.Broker.csproj -c Release
-
-      - name: Instalar dependencias do servidor MCP
-        working-directory: src/svault-mcp
-        run: npm ci --no-audit --no-fund
-
-      - name: Teste de fumaca do broker
+      - name: Teste de fumaca do broker e MCP nativo
         shell: pwsh
         run: ./tests/run-smoke.ps1
 
-      - name: Teste de fumaca do servidor MCP
+      - name: Teste isolado do protocolo MCP via PowerShell
         shell: pwsh
-        run: node tests/mcp-smoke.mjs artifacts/broker/svault-broker.exe src/svault-mcp/index.mjs
+        run: ./tests/Mcp.SmokeTest.ps1 -BrokerExe artifacts/broker/svault-broker.exe -McpExe artifacts/broker/svault-mcp.exe
 
       - name: Testes do pacote e rollback do instalador
         shell: pwsh
@@ -51,7 +41,7 @@ jobs:
           ./tests/InstallerPackage.SmokeTest.ps1
           ./tests/InstallRollback.SmokeTest.ps1
 
-  manager:
+  installer:
     runs-on: windows-2022
     timeout-minutes: 60
     env:
@@ -62,18 +52,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Testes do gerenciador
-        run: cargo test --locked --target x86_64-pc-windows-msvc --manifest-path src/svault-manager/Cargo.toml
-
-      - name: Gerar instalador Windows x64 e checksum
+      - name: Gerar instalador Windows x64 (Full Rust) e checksum
         shell: pwsh
         run: |
           $buildArgs = @{}
@@ -93,7 +72,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
-    needs: [test, manager]
+    needs: [test, installer]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

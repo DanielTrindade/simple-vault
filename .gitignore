@@ -4,9 +4,6 @@ obj/
 artifacts/
 target/
 
-# Node
-node_modules/
-
 # IDE
 .vs/
 .idea/
